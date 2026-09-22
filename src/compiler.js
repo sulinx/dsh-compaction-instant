@@ -24,6 +24,13 @@
  *
  * @module dsh-compaction-instant/compiler
  */
+import { isCheckpointSource } from "./indices.js";
+
+// The checkpoint-source rule is shared with recall (one definition, so the
+// side that PRINTS a `[checkpoint N]` marker and the side that RESOLVES it can
+// never disagree). Re-exported here because this module is the compiler's
+// public surface.
+export { isCheckpointSource };
 
 // ── tokenizer (VCC `_tokenize` / `_TOK_RE`) ────────────────────────────────
 
@@ -390,20 +397,9 @@ export function projectToolResultText(blocks) {
 /**
  * Whether a message source identifies a landed compaction checkpoint node.
  *
- * Two host generations spell this differently: dsh ≤ 0.1.6 marks the landed
- * checkpoint `{kind:"plugin", plugin:"compact"}`, while 0.1.7 emits a dedicated
- * `{kind:"compact-checkpoint", compactionId}` source. Both must be recognized —
- * a checkpoint is the condensed history itself, so misreading one as an
- * ordinary user turn both truncates it to the user-text budget and demotes it
- * in the cap-elision order.
- * @param source - `message.source` from `Session.deriveEventMessage`.
- * @returns true when the node is a landed checkpoint.
+ * Defined in `./indices.js` (the shared reference space) and re-exported above;
+ * documented there so the printing and resolving sides keep one rule.
  */
-export function isCheckpointSource(source) {
-  if (source === undefined || source === null || typeof source !== "object") return false;
-  if (source.kind === "compact-checkpoint") return true;
-  return source.kind === "plugin" && source.plugin === "compact";
-}
 
 /**
  * Canonical identity of one message source, as `<kind>:<name>` — the DSH
@@ -496,11 +492,57 @@ const CHECKPOINT_CLOSE_TAG = "</compacted-checkpoint>";
  * agent how to recover content the compiler elided or truncated, using the
  * two recall tools that read the append-only durable log.
  */
-export const RECALL_GUIDE = "RECALL: append-only log — nothing is lost. `recall` restores original content: type \"seq\", id \"3-7\"; \"result\", id \"3\"; \"checkpoint\", id \"1\" (`[checkpoint N]` = dropped). `search` finds by keyword, regex or prose; `touched_files` lists files this session touched.";
+export const RECALL_GUIDE = "RECALL: append-only log — nothing is lost. Every pointer printed here pastes back verbatim into `recall`: type \"seq\" with the id from `(seq N)` / `(seqs A-B)` / `#N`; \"result\" with N from `-> result N`; \"checkpoint\" with the N from `[checkpoint N]` (`seq N` also works). `search` finds by keyword, regex or prose; `touched_files` lists files this session touched.";
 
-/** Per-node reference marker: the durable seq is the lossless pointer. */
+/**
+ * Per-node reference marker: the durable seq is the lossless pointer. */
 function seqRef(seq) {
   return `seq ${seq}`;
+}
+
+/**
+ * Advisory prepended to a nested checkpoint whose pointers do not resolve in
+ * THIS session's log.
+ *
+ * A session can be seeded from a parent (`isSeeded: true`, e.g. a handoff or
+ * continued session): the parent's landed checkpoints are replayed into it
+ * verbatim, and their `(seq N)` / `-> result N` pointers refer to the PARENT's
+ * numbering. Measured on this machine: one seeded session carried 273 such
+ * pointers out of ~2.8k in its copied-forward checkpoint text — every other
+ * session resolved 100% of 66k markers.
+ *
+ * The pointers cannot be rewritten (the parent log may be gone, and the text
+ * must stay verbatim), so the compiler says so instead: `search` still finds
+ * that content, and `recall` works for pointers minted in this session.
+ */
+export const FOREIGN_SEQ_NOTE = "_[these seq pointers came from another session's log; use `search` to recover this block]_";
+
+/** How many `-> result N` pointers to test before deciding a block is foreign. */
+const FOREIGN_SAMPLE = 16;
+/** Minimum resolvable-looking samples before a verdict is allowed. */
+const FOREIGN_MIN_SAMPLES = 3;
+
+/**
+ * Whether a nested checkpoint's `-> result N` pointers resolve in this session.
+ *
+ * Within one session every pointer this compiler emits is `tool/result`
+ * by construction, so a block whose result pointers mostly are not is text
+ * carried in from another log. Fail-open: without a resolver, or with too few
+ * samples, the block is treated as local (no annotation).
+ * @param text - nested checkpoint text.
+ * @param seqTypeOf - `(seq) => event type | undefined`, or undefined.
+ * @returns true when the block's pointers demonstrably belong elsewhere.
+ */
+export function isForeignCheckpointText(text, seqTypeOf) {
+  if (typeof seqTypeOf !== "function") return false;
+  let samples = 0;
+  let foreign = 0;
+  for (const match of text.matchAll(/\(seq\s+\d+\s*->\s*result\s+(\d+)\)/g)) {
+    samples += 1;
+    if (seqTypeOf(Number(match[1])) !== "tool/result") foreign += 1;
+    if (samples >= FOREIGN_SAMPLE) break;
+  }
+  return samples >= FOREIGN_MIN_SAMPLES && foreign * 2 >= samples;
 }
 
 /**
@@ -577,7 +619,8 @@ export function compileNodes(nodes, config, budgets) {
     elidedRows: 0,
     injectedSkipped: 0,
     injectedSkippedTokens: 0,
-    injectedByKey: {}
+    injectedByKey: {},
+    foreignCheckpoints: 0
   };
   // Pre-pass over the ordered nodes: map each tool-call id to the seq of its
   // result node, so every call one-liner can carry a VCC-style result pointer
@@ -727,7 +770,10 @@ export function compileNodes(nodes, config, budgets) {
           // (surface replacement only allows message nodes), but it is
           // harness-generated framing — display it as [system].
           const header = roleHeader("system", node.seq);
-          pushEntry(node.seq, header + text, "checkpoint");
+          const foreign = isForeignCheckpointText(text, config.seqTypeOf);
+          if (foreign) stats.foreignCheckpoints += 1;
+          pushEntry(node.seq, header + (foreign ? `${FOREIGN_SEQ_NOTE}\n${text}` : text), "checkpoint");
+          debugLog(config, "checkpoint", `seq=${node.seq} chars=${text.length} foreign=${foreign}`);
         }
         continue;
       }

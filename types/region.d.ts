@@ -35,17 +35,41 @@ export interface PreparedRegion {
     measurement: TokenMeasurement;
     selectedNodes: readonly { seq: number; tokens: number }[];
     shadowedTokenCount: number;
+    /** Which retention rule kept the tail (see {@link RetainedTail}). */
+    tail?: RetainedTail;
+}
+
+/**
+ * Provenance of the verbatim tail the selection retained: the rule that
+ * decided it, how much survived, and whether the tool-pair guard had to
+ * recede. The DSH counterpart of upstream pi-vcc's `budgetCut`.
+ */
+export interface RetainedTail {
+    /** `retain-turns` | `whole-turns` | `node-suffix`. */
+    policy: 'retain-turns' | 'whole-turns' | 'node-suffix';
+    /** Number of surface nodes left uncompiled in the retained region. */
+    keptNodes: number;
+    /** Priced tokens of those nodes. */
+    keptTokens: number;
+    /** The configured ceiling (0 when the preferred-turn rule applies). */
+    ceiling: number;
+    /** Whether the tool-pairing guard moved the keep boundary. */
+    receded: boolean;
 }
 
 export interface CompactionOptions {
     owner: 'current-turn' | null;
     stability: 'whole-surface' | 'selected-span';
     sourceCommandId?: string;
+    /** Retained-tail provenance carried into the checkpoint footer. */
+    tail?: RetainedTail;
     flush?: () => Promise<void>;
 }
 
 /** Resolve the next head-anchored, tool-pairing-balanced range. */
-export declare function selectCompactableRange(session: Session, measurement: TokenMeasurement, retainTokens: number): { start: number; end: number } | null;
+export declare function selectCompactableRange(session: Session, measurement: TokenMeasurement, retainTurns: number, retainTokens: number): { start: number; end: number; tail: RetainedTail } | null;
+/** Human-readable account of the retained tail, for the checkpoint footer. */
+export declare function describeTail(tail: RetainedTail | undefined | null): string;
 /** Run the single durable compaction transaction over one positional span. */
 export declare function compactSurfaceRegion(dependencies: RegionDependencies, session: Session, start: number, end: number, agent: Agent | undefined, options: CompactionOptions, signal: AbortSignal | undefined): Promise<CompactionResult>;
 /** Wrap text in an adaptive Markdown code fence (longer than any inner ``` run). */

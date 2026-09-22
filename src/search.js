@@ -72,7 +72,7 @@
 import { estimateEntryTokens, parseToolArguments, sanitize, truncateTokens } from "./compiler.js";
 import { projectMessageText } from "./recall.js";
 import { formatHitBlock, formatSearchHeader, formatTouchedOutput, TOUCHED_PAGE_SIZE } from "./format.js";
-const sessionEvents = (s) => (Array.isArray(s.events) ? s.events : s.snapshotEvents ? s.snapshotEvents() : []);
+import { createEventIndex, sessionEvents } from "./indices.js";
 
 /** Default cap on the number of matching events shown in one result. */
 export const DEFAULT_MAX_SEARCH_HITS = 50;
@@ -481,10 +481,10 @@ function scanRegex(context, resolved, config) {
   let totalMatches = 0;
   let budget = config.maxRecallTokens;
   let truncated = false;
-  for (let seq = 0; seq < events.length; seq += 1) {
+  for (const event of events) {
+    const seq = event?.seq;
+    if (typeof seq !== "number") continue;
     checkBudget();
-    const event = events[seq];
-    if (event === undefined || event.seq !== seq) continue;
     if (isSelfSearchEvent(event, context.selfCalls)) continue;
     const message = typeof context.session.deriveEventMessage === "function" ? context.session.deriveEventMessage(event) : null;
     const text = searchableText(event, message);
@@ -549,10 +549,10 @@ function scanTerms(context, source, config) {
   let documents = 0;
   let totalLength = 0;
   let totalMatches = 0;
-  for (let seq = 0; seq < events.length; seq += 1) {
+  for (const event of events) {
+    const seq = event?.seq;
+    if (typeof seq !== "number") continue;
     checkBudget();
-    const event = events[seq];
-    if (event === undefined || event.seq !== seq) continue;
     if (isSelfSearchEvent(event, context.selfCalls)) continue;
     const message = typeof context.session.deriveEventMessage === "function" ? context.session.deriveEventMessage(event) : null;
     const text = searchableText(event, message);
@@ -610,7 +610,7 @@ function scanTerms(context, source, config) {
       truncated = true;
       break;
     }
-    const event = events[entry.candidate.seq];
+    const event = context.index.at(entry.candidate.seq);
     const message = typeof context.session.deriveEventMessage === "function" ? context.session.deriveEventMessage(event) : null;
     const snippet = lineSnippet(searchableText(event, message), snippetPattern);
     const block = formatHitBlock({
@@ -656,7 +656,11 @@ export function searchSession(session, patternSource, config) {
   const checkBudget = () => {
     if (Date.now() > deadline) throw new SearchBudgetExceededError(source, budgetMs);
   };
-  const context = { session, events: sessionEvents(session), checkBudget, selfCalls: new Set() };
+  // One seq index for the whole search: the ranked second pass re-reads the
+  // events its candidates came from, and a non-dense host array must resolve
+  // them by seq rather than by position.
+  const index = createEventIndex(session);
+  const context = { session, events: index.events, index, checkBudget, selfCalls: new Set() };
 
   let mode = queryMode(source);
   let literal = false;
@@ -737,10 +741,10 @@ export function collectTouchedFiles(session, config = {}) {
   const events = sessionEvents(session);
   const selfCalls = new Set();
   const byPath = new Map();
-  for (let seq = 0; seq < events.length; seq += 1) {
+  for (const event of events) {
+    const seq = event?.seq;
+    if (typeof seq !== "number") continue;
     checkBudget();
-    const event = events[seq];
-    if (event === undefined || event.seq !== seq) continue;
     if (isSelfSearchEvent(event, selfCalls)) continue;
     const message = typeof session.deriveEventMessage === "function" ? session.deriveEventMessage(event) : null;
     if (message === null || !Array.isArray(message.content)) continue;

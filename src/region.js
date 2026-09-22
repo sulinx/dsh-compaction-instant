@@ -20,7 +20,7 @@ import { createUserMessage, errorChain } from "@deepseek-ai/dsh-llm";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { frameCheckpoint, joinCompiledEntries } from "./compiler.js";
-const sessionEvents = (s) => (Array.isArray(s.events) ? s.events : s.snapshotEvents ? s.snapshotEvents() : []);
+import { sessionEvents } from "./indices.js";
 
 /**
  * Rejects a compiled checkpoint whose replacement boundaries are no longer
@@ -85,6 +85,11 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
   if (lastTurn === 0) return null;
   const preferredTurns = Math.max(1, retainTurns);
   let keepFromIdx;
+  // Which retention rule produced the kept tail. Reported in the checkpoint
+  // footer and in the durable stats: upstream pi-vcc records the same
+  // provenance (`budgetCut: "no_anchor" | "oversized_tail"`) so a surprising
+  // tail is explainable from the transcript alone instead of guesswork.
+  let policy;
   if (retainTokens > 0) {
     // Absolute ceiling: roll whole turns backward while they fit.
     let scanIdx = turns.length;
@@ -102,6 +107,7 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
     if (scanIdx === turns.length) {
       // Even the latest turn exceeds the ceiling: keep the node suffix that
       // fits inside it (then the balance guard recedes as usual).
+      policy = "node-suffix";
       let nodeTotal = 0;
       keepFromIdx = turns.length;
       const latestStart = turnStartIndex(turns, turns.length - 1);
@@ -111,6 +117,7 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
         keepFromIdx = index;
       }
     } else {
+      policy = "whole-turns";
       keepFromIdx = latestWholeIdx;
     }
     // Preferred-turn rule: when the ceiling still has room and fewer than
@@ -118,10 +125,12 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
     // cannot fit (loop above broke) — nothing more to do.
     void preferredTurns;
   } else {
+    policy = "retain-turns";
     const mandatoryTurnFloor = Math.max(0, lastTurn - preferredTurns + 1);
     keepFromIdx = 0;
     while (keepFromIdx < turns.length && turns[keepFromIdx] < mandatoryTurnFloor) keepFromIdx += 1;
   }
+  const boundaryBeforeGuard = keepFromIdx;
   while (keepFromIdx > 0) {
     // `keepFromIdx` is a keep-boundary index, so it can legitimately sit at
     // `turns.length` (the ceiling loop above keeps nothing when the newest
@@ -140,10 +149,36 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
   const headEvent = sessionEvents(session).find((event) => event.seq === surfaceNodes[0]);
   const headSkip = headEvent?.type === "system/message" ? 1 : 0;
   if (keepFromIdx - headSkip <= 0) return null;
+  const retainedNodes = pricedNodes.slice(keepFromIdx);
   return {
     start: surfaceNodes[headSkip],
-    end: surfaceNodes[keepFromIdx - 1]
+    end: surfaceNodes[keepFromIdx - 1],
+    tail: {
+      policy,
+      keptNodes: retainedNodes.length,
+      keptTokens: retainedNodes.reduce((total, node) => total + node.tokens, 0),
+      ceiling: retainTokens,
+      receded: keepFromIdx < boundaryBeforeGuard
+    }
   };
+}
+
+/**
+ * One-line, human-readable account of the retained tail: which rule kept it
+ * and whether the tool-pair guard had to recede. Pure, so it is testable
+ * without a session.
+ * @param tail - `tail` metadata from {@link selectCompactableRange}.
+ * @returns the parenthetical suffix appended to the retention footer.
+ */
+export function describeTail(tail) {
+  if (tail === undefined || tail === null) return "未被压缩,仍在对话中";
+  const reasons = {
+    "retain-turns": "按保留回合数",
+    "whole-turns": "整回合不超上限",
+    "node-suffix": `最新回合超过 ${tail.ceiling} token 上限,仅保留装得下的部分`
+  };
+  const reason = reasons[tail.policy] ?? tail.policy ?? "未知规则";
+  return `${reason}${tail.receded === true ? ";已为工具配对回退" : ""};未被压缩,仍在对话中`;
 }
 
 /**
@@ -191,7 +226,10 @@ export async function compactSurfaceRegion(dependencies, session, start, end, ag
   let closing = false;
   let stage = "summary";
   try {
-    const prepared = prepareCompaction(dependencies, session, selection);
+    const prepared = prepareCompaction(dependencies, session, {
+      ...selection,
+      ...options.tail === undefined ? {} : { tail: options.tail }
+    });
     const compiled = await compileCompaction(dependencies, prepared, agent, compactionId, options.sourceCommandId, signal);
     if (options.owner === null) signal?.throwIfAborted();
     assertStable(dependencies, session, compiled);
@@ -326,7 +364,7 @@ async function compileCompaction(dependencies, prepared, agent, compactionId, so
   const retainedNodes = prepared.measurement.nodes.slice(prepared.endIdx + 1);
   const retainedTokenCount = retainedNodes.reduce((total, node) => total + node.tokens, 0);
   const footerLine = retainedNodes.length === 0 ? undefined
-    : `尾部原文保留: ${retainedNodes.length} 节点 / ~${retainedTokenCount} tokens（未被压缩,仍在对话中）`;
+    : `尾部原文保留: ${retainedNodes.length} 节点 / ~${retainedTokenCount} tokens（${describeTail(prepared.tail)}）`;
   const bodyEntries = [
     introLine,
     headerLine,

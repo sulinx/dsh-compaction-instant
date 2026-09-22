@@ -5,8 +5,14 @@
 
 /** Default total budget for one recall operation, in density-aware tokens. */
 export declare const DEFAULT_MAX_RECALL_TOKENS: number;
-/** Widest single range accepted from one selection. */
+/**
+ * Widest single range expanded at once. A wider requested range is expanded in
+ * chunks of this width rather than rejected, so a printed
+ * `[N entries elided: seqs A-B]` marker always pastes back.
+ */
 export declare const MAX_RECALL_SPAN: number;
+/** Ceiling on the total number of seqs one reference may expand to. */
+export declare const MAX_RECALL_SEQS: number;
 
 /** One inclusive seq range parsed from a selection string. */
 export interface SeqSelection {
@@ -55,8 +61,8 @@ export declare function projectMessageText(
     /** `skipToolCalls`: tool names whose call arguments are left out (search excludes its own surface). */
     options?: { skipToolCalls?: readonly string[] }
 ): string;
-/** Expand ordered selections into a deduplicated ordered seq list. */
-export declare function expandSelections(selections: readonly SeqSelection[]): number[];
+/** Expand ordered selections into a deduplicated ordered seq list (chunked). */
+export declare function expandSelections(selections: readonly SeqSelection[], maxSpan?: number): number[];
 /** Collect the seqs of every landed checkpoint node, oldest first (1 = oldest compaction). */
 export declare function findCheckpointSeqs(session: RecallableSession): number[];
 /** Resolve one typed recall reference (`seq` / `result` / `checkpoint`) into seq ranges. */

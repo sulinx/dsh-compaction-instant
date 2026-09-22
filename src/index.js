@@ -17,9 +17,9 @@ import { appendFileSync } from "node:fs";
 import { CompactionEngine, ManualCompactionError } from "@deepseek-ai/dsh-compaction";
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
-import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES, isCheckpointSource } from "./compiler.js";
+import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES } from "./compiler.js";
+import { checkpointOrdinals, createEventIndex } from "./indices.js";
 import { assertNoActiveCompaction, compactSurfaceRegion, selectCompactableRange } from "./region.js";
-const sessionEvents = (s) => (Array.isArray(s.events) ? s.events : s.snapshotEvents ? s.snapshotEvents() : []);
 
 // ── configuration resolution ───────────────────────────────────────────────
 
@@ -675,9 +675,10 @@ export class InstantCompactionEngine extends CompactionEngine {
    * @returns ordered checkpoint entries plus backend provenance and stats.
    */  async compile(prepared, agent, signal) {
     signal?.throwIfAborted();
+    const index = createEventIndex(prepared.session);
     const nodes = prepared.shadowedSeqs.map((seq) => {
-      const event = sessionEvents(prepared.session)[seq];
-      if (event === undefined || event.seq !== seq) throw new Error(`compaction: surface seq ${seq} has no matching session event (corrupt surface)`);
+      const event = index.at(seq);
+      if (event === undefined) throw new Error(`compaction: surface seq ${seq} has no matching session event (corrupt surface)`);
       return {
         seq,
         message: prepared.session.deriveEventMessage(event)
@@ -686,19 +687,18 @@ export class InstantCompactionEngine extends CompactionEngine {
     // Session-wide checkpoint ordinals (1 = oldest compaction): the compiler
     // uses them to leave `[checkpoint N]` lines when a prior checkpoint is
     // elided under cap pressure, so the agent can recall the dropped layer.
-    const checkpointOrdinals = new Map();
-    let checkpointCount = 0;
-    for (const event of sessionEvents(prepared.session)) {
-      if (event.type === "user/message" && isCheckpointSource(event.data?.source)) {
-        checkpointCount += 1;
-        checkpointOrdinals.set(event.seq, checkpointCount);
-      }
-    }
-    engineDebug(this.config, `compile span=${prepared.shadowedSeqs.length} seqs=${prepared.shadowedSeqs[0]}-${prepared.shadowedSeqs[prepared.shadowedSeqs.length - 1]} shadowedTokens=${prepared.shadowedTokenCount} cap=${this.effectiveMaxTokens(prepared.shadowedTokenCount)} checkpoints=${checkpointCount}`);
+    // The same rule (`./indices.js`) resolves that ordinal in `recall`, so the
+    // marker printed here and the marker resolved there cannot drift.
+    const ordinals = checkpointOrdinals(prepared.session);
+    engineDebug(this.config, `compile span=${prepared.shadowedSeqs.length} seqs=${prepared.shadowedSeqs[0]}-${prepared.shadowedSeqs[prepared.shadowedSeqs.length - 1]} shadowedTokens=${prepared.shadowedTokenCount} cap=${this.effectiveMaxTokens(prepared.shadowedTokenCount)} checkpoints=${ordinals.size} tail=${prepared.tail === undefined ? "unreported" : `${prepared.tail.policy}/kept=${prepared.tail.keptNodes}nodes/${prepared.tail.keptTokens}tok/receded=${prepared.tail.receded === true}`}`);
     const { entries, stats, capped } = compileRegion(nodes, {
       ...this.config,
       maxTokens: this.effectiveMaxTokens(prepared.shadowedTokenCount),
-      checkpointOrdinals
+      checkpointOrdinals: ordinals,
+      // A nested checkpoint carried in from a parent (seeded) session keeps its
+      // own numbering; this lets the compiler mark such a block instead of
+      // presenting pointers that cannot resolve here.
+      seqTypeOf: (seq) => index.at(seq)?.type
     });
     engineDebug(this.config, `compile done entries=${entries.length} tokens=${stats.tokens} capped=${capped} toolCalls=${stats.toolCalls} toolResults=${stats.toolResults} skippedInject=${stats.injectedSkipped} skippedInjectTokens=${stats.injectedSkippedTokens}`);
     return {
@@ -739,7 +739,7 @@ export class InstantCompactionEngine extends CompactionEngine {
       }
       const range = selectCompactableRange(agent.session, measurement, 1, 0);
       if (range === null) return null;
-      return this.compactRegion(range.start, range.end, agent, signal);
+      return this.compactRegion(range.start, range.end, agent, signal, range.tail);
     }
     const context = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context;
     assertNoActiveCompaction(agent.session, "automatic pressure compaction");
@@ -761,7 +761,7 @@ export class InstantCompactionEngine extends CompactionEngine {
         /* v8 ignore next -- paired with the defensive post-success branch above. */
         break;
       }
-      result = await this.compactRegion(range.start, range.end, agent, signal);
+      result = await this.compactRegion(range.start, range.end, agent, signal, range.tail);
       measurement = meter.measure(agent.session);
       if (measurement.totalTokens < spec.thresholdTokens) return result;
     }
@@ -774,12 +774,16 @@ export class InstantCompactionEngine extends CompactionEngine {
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session, retained for signature parity.
    * @param signal - optional cancellation signal.
+   * @param tail - optional retained-tail provenance from the selection, carried
+   *   into the checkpoint footer so the retention rule is visible in the
+   *   transcript.
    * @returns the successful durable compaction result.
    */
-  async compactRegion(start, end, agent, signal) {
+  async compactRegion(start, end, agent, signal, tail) {
     return compactSurfaceRegion(this.regionDependencies(), agent.session, start, end, agent, {
       owner: "current-turn",
-      stability: "whole-surface"
+      stability: "whole-surface",
+      ...tail === undefined ? {} : { tail }
     }, signal);
   }
   /**
@@ -803,6 +807,7 @@ export class InstantCompactionEngine extends CompactionEngine {
           return await compactSurfaceRegion(this.regionDependencies(), agent.session, range.start, range.end, agent, {
             owner: null,
             stability: "selected-span",
+            tail: range.tail,
             ...sourceCommandId === undefined ? {} : { sourceCommandId },
             flush: async () => {
               await this.ctx.sessions.flush(agent.session);

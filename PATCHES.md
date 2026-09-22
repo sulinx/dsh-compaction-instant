@@ -39,6 +39,8 @@ and any intentional change here must update the tracking manifest in the same co
 
 | **P2a · skip per-turn injections** | `core/settings.ts` + `hooks/before-compact.ts` (`skipCustomTypes`, refs #23) | Upstream drops user-declared `customType` entries from the **summarizer input** only, because some extensions inject per-turn boilerplate that is regenerated every request. Here the same rule is keyed on the DSH message source: `injectKeyOf(source)` builds `<kind>:<name>` (`runtime-context:snapshot`, `plugin:@deepseek-ai/dsh-system-prompt`, `skill-catalog:catalog`, `plugin:compact`, `compact-checkpoint:-`, `user:-`), and `skipInjectTypes` (default: the runtime-context/memory snapshot + the skill catalog, in both host spellings) is filtered out of the compiled view. Upstream's invariant is preserved: **only the compiled view is filtered** — region selection, token pricing, `firstKeptEntryId`-equivalent boundaries and kept-turn counts are untouched. Dropped nodes leave one consolidated `note` marker (`[N per-turn injection event(s) omitted: … (~T tokens)]`) so nothing is silently missing; being a `note`, the cap-elision pass drops it first. `skipPerTurnInjections: false` disables the filter; an empty `skipInjectTypes` means *unset* and falls back to the defaults (the same cordis `[]` rule as `hideTools`). Checkpoints are never skipped. | `src/compiler.js`, `src/index.js`, `src/client.js`, `types/compiler.d.ts`, `types/index.d.ts`, `test/skip-inject.test.js` (new) |
 
+| **P2b · shared reference space + honest tail cut** | `core/global-indices.ts` (k0valik/pi-blackhole `f82e07a`, issue #28), `hooks/before-compact.ts` (`budgetCut`, the token-budget tail cut) | Upstream's rule is that the side which **prints** a reference and the side which **resolves** it must number by one shared definition, not by two implementations that happen to agree. In DSH the durable `seq` already is the global number, so what is ported is the single definition: `src/indices.js` now owns ① the seq→event lookup (dense fast path, map fallback for a non-dense host array), ② the **session-wide checkpoint ordinal** used both for the `[checkpoint N]` markers the compiler prints and for `recall(type:"checkpoint")` (previously computed twice, in `index.js` and `recall.js`), and ③ `parseRefToken`, the one parser for every form the engine prints (`12`, `3-7`, `seq 12`, `seqs 3-7`, `(seq 12)`, `#12`, `result 12`, `checkpoint 3`). Two emitter/resolver asymmetries it exposed were fixed: the file renderer prints `#N`, which `recall` used to reject; and a `[N entries elided: seqs A-B]` marker wider than the expansion chunk was rejected, so a marker the engine printed could not be pasted back — wide ranges are now expanded in chunks with the total bounded at `MAX_RECALL_SEQS` (100000) instead. The **tail cut** is already turn-anchored + ceiling-bounded here, so what is ported from upstream's `budgetCut` is its provenance: `selectCompactableRange` reports `tail = { policy: retain-turns \| whole-turns \| node-suffix, keptNodes, keptTokens, ceiling, receded }`, the checkpoint footer prints it (`describeTail`), and the debug line carries it. | `src/indices.js` (new), `src/recall.js`, `src/compiler.js`, `src/region.js`, `src/index.js`, `src/search.js`, `package.json` (`./indices` export + `check`), `types/indices.d.ts` (new), `types/recall.d.ts`, `types/region.d.ts`, `test/p2b-refs.test.js` (new), `test/recall.test.js` |
+
 **Why the two source families are defaults (measured on real sessions)**: compiling the same
 compaction span with the filter off and on — 27 nodes: 8240 → 1042 tokens (87.4% saved), 23 nodes:
 6926 → 761 (89.0%), 13 nodes: 6455 → 290 (95.5%), 12 nodes: 3285 → 219 (93.3%). Across three sessions
@@ -62,6 +64,24 @@ spelling recognized, a prior checkpoint compiled as an ordinary user turn — tr
 `userTextTokens` instead of kept whole, rendered under `[user]` instead of `[system]`, demoted to a
 low-value row for cap elision, and invisible to `checkpointOrdinals`, so the `[checkpoint N]`
 recovery markers were never emitted. `isCheckpointSource` now accepts both shapes.
+
+**Measured before porting P2b (why the "cross-checkpoint `#N` drifts" premise did not hold here)**:
+the durable log already numbers globally and densely, so every marker the engine printed resolved —
+66,571 markers over ten real session logs, **0 unresolvable** — and the ordinals the compiler printed
+matched the ones `recall` resolved. What the audit *did* find was a different defect: a **seeded**
+session (`isSeeded: true`, parent transcript replayed in) inherits its parent's landed checkpoints
+verbatim, and those pointers address the parent's numbering — 273 of ~2.8k result pointers in that one
+session's inherited text, while the other nine sessions resolved 100%. The compiler cannot rewrite them
+(parent log may be gone, text must stay verbatim), so a nested checkpoint whose `-> result N` pointers
+do not resolve here is prefixed with one advisory line (`FOREIGN_SEQ_NOTE`) and counted in
+`stats.foreignCheckpoints`; `search` still reaches that content. Detection is decidable — inside one
+session this compiler only ever emits `tool/result` result pointers — and fail-open (no resolver, or
+fewer than three samples ⇒ treated as local). Replaying that session's recorded `shadowedSeqs` through
+the ported compiler flags 6 nested checkpoints and 0 in the healthy control session.
+
+**Deliberately not ported from P2b**: upstream's `#N` index *space* itself. Upstream needed it because
+Pi's recall renumbered across windows while summaries numbered within one; DSH's `seq` is already
+session-global and immutable, so introducing a second numbering would create the drift it prevents.
 
 **Deliberately not ported from P1**: upstream's `TOOL_ARGS_BUDGET` head cap on indexed tool-call
 arguments. Truncating the indexed text silently loses matches and this engine's contract is that

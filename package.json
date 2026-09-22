@@ -14,6 +14,10 @@
       "types": "./types/compiler.d.ts",
       "default": "./src/compiler.js"
     },
+    "./indices": {
+      "types": "./types/indices.d.ts",
+      "default": "./src/indices.js"
+    },
     "./region": {
       "types": "./types/region.d.ts",
       "default": "./src/region.js"
@@ -53,7 +57,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/format.js && node --check src/tool.js && node --check src/command.js && node --check src/client.js"
+    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/indices.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/format.js && node --check src/tool.js && node --check src/command.js && node --check src/client.js"
   },
   "engines": {
     "node": ">=18"
