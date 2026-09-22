@@ -20,7 +20,10 @@ function instantCompactionClientFactory(require) {
   Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
   var React = require("react");
-  var { createSnapshotStore } = require("@deepseek-ai/dsh-client-runtime/client");
+  // LOCAL PATCH (2026-09-03): dsh 0.1.2 removed the @deepseek-ai/dsh-client-runtime
+  // client bundle; createSnapshotStore now ships in @deepseek-ai/dsh-client-store
+  // (same API). Re-apply after any plugin reinstall/upgrade.
+  var { createSnapshotStore } = require("@deepseek-ai/dsh-client-store");
 
   // ── styles (injected once per page, matching the official cards' tokens) ──
   var css = [
@@ -386,7 +389,11 @@ function instantCompactionClientFactory(require) {
     var open = React.useState(false);
     var isOpen = open[0];
     var setOpen = open[1];
-    var state = props.useCompactionCard(function (snapshot) { return snapshot; });
+    // LOCAL PATCH (2026-09-03): the 0.1.2 settings UI only provides useXCard
+  // selectors for cards it knows; render nothing instead of throwing if the host
+  // UI does not provide useCompactionCard (engine/tools are host-side, unaffected).
+  if (typeof props.useCompactionCard !== "function") return null;
+  var state = props.useCompactionCard(function (snapshot) { return snapshot; });
     var t = props.t;
     if (!state.available) return null;
     var blocked = !state.dirty || state.invalid || state.saving;
@@ -506,7 +513,9 @@ function instantCompactionClientFactory(require) {
   /** Namespace of the instant-compaction settings section (Host side registers it). */
   var SETTINGS_NAMESPACE = "compaction-instant";
   /** Required services (cordis fiber inject). */
-  var inject = ["slots", "locale", "connection", "remote", "settingsScope"];
+  // LOCAL PATCH (2026-09-03): dropped "connection" - not a client service in dsh 0.1.2
+  // and unused by this client (apply() only uses locale/slots/remote/settingsScope).
+  var inject = ["slots", "locale", "remote", "settingsScope"];
 
   function apply(ctx) {
     var t = ctx.locale.bind(NS);
