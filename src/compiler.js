@@ -25,6 +25,7 @@
  * @module dsh-compaction-instant/compiler
  */
 import { isCheckpointSource } from "./indices.js";
+import { collapseRepeatedRows, DEFAULT_RANK_WEIGHTS, lowestValueIndex, rankKeyOf, rankScore } from "./rank.js";
 
 // The checkpoint-source rule is shared with recall (one definition, so the
 // side that PRINTS a `[checkpoint N]` marker and the side that RESOLVES it can
@@ -285,7 +286,25 @@ export const DEFAULT_TOOL_KEY_FIELDS = Object.freeze({
   glob: "pattern",
   grep: "pattern",
   bash: "command",
+  // The DSH shell tools. `pwsh` is this host's shell tool and it is by far the
+  // most-used row in real checkpoints (25,826 of 70,424 tool rows across ten
+  // measured sessions) — name-only rows there record that a command ran, never
+  // what it did, so the command is the key argument.
+  pwsh: "command",
+  shell: "command",
+  ssh_exec: "command",
+  ssh_batch: "command",
+  sftp_read: "path",
+  sftp_write: "path",
+  sftp_list: "path",
+  sftp_delete: "path",
+  web_fetch: "url",
+  web_fetch_pro: "url",
   web_search: "query",
+  web_search_pro: "query",
+  web_platform_search: "query",
+  browser_open: "url",
+  browser_crawl: "startUrls",
   skill: "name",
   ralph: "objective",
   subagent: "description",
@@ -314,7 +333,26 @@ export const DEFAULT_ARG_TOOLS = Object.freeze([
   "grep",
   "bash",
   "shell",
+  // DSH shell / remote-execution / browser-fetch tools: the argument IS the
+  // durable fact (measured: 56% of tool rows rendered name-only before this).
+  "pwsh",
+  "ssh_exec",
+  "ssh_batch",
+  "sftp_read",
+  "sftp_write",
+  "sftp_list",
+  "sftp_delete",
+  "web_fetch",
+  "web_fetch_pro",
   "web_search",
+  "web_search_pro",
+  "web_platform_search",
+  "browser_open",
+  "browser_crawl",
+  // This engine's own read-back tools: what was looked up is worth one line.
+  "recall",
+  "search",
+  "touched_files",
   "skill",
   "subagent",
   "subagent_fork",
@@ -620,7 +658,8 @@ export function compileNodes(nodes, config, budgets) {
     injectedSkipped: 0,
     injectedSkippedTokens: 0,
     injectedByKey: {},
-    foreignCheckpoints: 0
+    foreignCheckpoints: 0,
+    collapsedRows: 0
   };
   // Pre-pass over the ordered nodes: map each tool-call id to the seq of its
   // result node, so every call one-liner can carry a VCC-style result pointer
@@ -637,18 +676,36 @@ export function compileNodes(nodes, config, budgets) {
   let lastRole;
   let open = false;
   let firstInjectedSeq;
+  // Relevance ranking (upstream `core/rank.ts`): rows carry a score so the cap
+  // elision drops the least valuable low-value row instead of the oldest, and a
+  // repeat identity so runs of the same row can collapse into one marker.
+  const ranking = config.rankElision !== false;
+  const weights = { ...DEFAULT_RANK_WEIGHTS, ...(config.rankWeights ?? {}) };
+  const repeatCounts = new Map();
 
   /**
    * Append one compiled entry carrying a deletion-priority kind. Kinds order
    * the cap-elision passes in compileRegion: `result`/`tool`/`media`/`note`
    * rows are dropped before `text`/`reasoning`/`checkpoint` rows, so when a
    * checkpoint must shrink, the conversation's words survive its logs.
+   *
+   * Each entry also carries its relevance (`score`, `reasons`) and its repeat
+   * identity (`rankKey`), computed from the SAME node data the row was rendered
+   * from: the ranking decides which low-value row leaves first and which
+   * repeated rows collapse, instead of plain oldest-first.
    * @param seq - durable seq the entry derives from.
    * @param text - rendered entry text.
    * @param kind - entry kind (see the kind list above).
+   * @param detail - `{ toolName?, argText?, role? }` for the ranking.
    */
-  const pushEntry = (seq, text, kind) => {
-    entries.push({ seq, text, kind });
+  const pushEntry = (seq, text, kind, detail = {}) => {
+    const rankKey = rankKeyOf({ kind, toolName: detail.toolName, argText: detail.argText });
+    const repeats = rankKey === undefined ? 1 : (repeatCounts.get(rankKey) ?? 0) + 1;
+    if (rankKey !== undefined) repeatCounts.set(rankKey, repeats);
+    const { score, reasons } = ranking
+      ? rankScore({ kind, text, toolName: detail.toolName, argText: detail.argText, role: detail.role, index: entries.length, total: nodes.length, repeats }, weights)
+      : { score: 0, reasons: [] };
+    entries.push({ seq, text, kind, score, reasons, rankKey });
     stats.entries += 1;
     stats.tokens += estimateEntryTokens(text);
   };
@@ -672,7 +729,7 @@ export function compileNodes(nodes, config, budgets) {
           if (text.trim().length === 0) continue;
           header = roleHeader("assistant", node.seq);
           const kept = truncateTokens(text, effective.textTokens, seqRef(node.seq));
-          pushEntry(node.seq, header + kept.text, "text");
+          pushEntry(node.seq, header + kept.text, "text", { role: "assistant" });
           continue;
         }
         if (block.type === "reasoning") {
@@ -700,9 +757,11 @@ export function compileNodes(nodes, config, budgets) {
           // result 3)`) so the dropped result stays one recall away.
           let oneLine;
           let diag;
+          let keyArg;
           if (argTools.includes(name)) {
             const parsed = parseToolArguments(block.arguments);
             const arg = pickToolKeyArg(name, parsed, keyFields);
+            keyArg = arg;
             oneLine = arg === undefined ? `* ${name}` : `* ${name} "${oneLineArg(arg)}"`;
             diag = `whitelist=yes argsType=${typeof block.arguments} argsLen=${block.arguments === null || block.arguments === undefined ? 0 : String(block.arguments).length} argsHead=${JSON.stringify(String(block.arguments).slice(0, 60))} parse=${parsed === null ? "FAIL" : "ok"} key=${keyFields[name] ?? "(fallback)"} arg=${arg === undefined ? "(none)" : JSON.stringify(String(arg).slice(0, 60))}`;
           } else {
@@ -713,7 +772,9 @@ export function compileNodes(nodes, config, budgets) {
           const ref = resultSeq === undefined ? seqRef(node.seq) : `${seqRef(node.seq)} -> result ${resultSeq}`;
           const kept = truncateTokens(oneLine, effective.toolCallTokens, seqRef(node.seq));
           debugLog(config, "tool", `seq=${node.seq} name=${name} ${diag} line=${JSON.stringify(oneLine.slice(0, 80))} truncated=${kept.truncated} ref=${ref}`);
-          pushEntry(node.seq, header + `${kept.text} (${ref})`, "tool");
+          // The ranking scores the same argument the one-liner renders, so a
+          // `pwsh "npm test"` row outranks `pwsh "cd /tmp"`.
+          pushEntry(node.seq, header + `${kept.text} (${ref})`, "tool", { toolName: name, argText: keyArg });
           continue;
         }
         if (block.type === "image") {
@@ -787,7 +848,7 @@ export function compileNodes(nodes, config, budgets) {
           surviving += 1;
           header = roleHeader("user", node.seq);
           const kept = truncateTokens(text, effective.userTextTokens, seqRef(node.seq));
-          pushEntry(node.seq, header + kept.text, "text");
+          pushEntry(node.seq, header + kept.text, "text", { role: "user" });
         } else if (block.type === "image") {
           stats.images += 1;
           surviving += 1;
@@ -804,7 +865,7 @@ export function compileNodes(nodes, config, budgets) {
           surviving += 1;
           header = roleHeader("user", node.seq);
           const kept = truncateTokens(text, effective.userTextTokens, seqRef(node.seq));
-          pushEntry(node.seq, header + kept.text, "text");
+          pushEntry(node.seq, header + kept.text, "text", { role: "user" });
         }
       }
       if (surviving === 0) {
@@ -817,16 +878,31 @@ export function compileNodes(nodes, config, budgets) {
   // boilerplate, so a per-run marker would only add back the noise the filter
   // removes. It is a `note` row, so the cap-elision pass drops it first when a
   // checkpoint is under budget pressure.
+  let output = entries;
+  // Repeat collapsing (upstream `dedupKey`): the same tool row rendered many
+  // times (a polled job, a repeated read) carries one durable fact. Runs of
+  // three or more keep their first and last occurrence and collapse the middle
+  // into a single `note` marker naming the seq range, which `recall` restores in
+  // full — the same contract as every other elision.
+  if (ranking) {
+    const collapsed = collapseRepeatedRows(entries);
+    output = collapsed.entries;
+    if (collapsed.collapsed) {
+      stats.collapsedRows += collapsed.collapsedRows;
+      stats.entries = output.length;
+      stats.tokens = output.reduce((total, entry) => total + estimateEntryTokens(entry.text), 0);
+    }
+  }
   if (stats.injectedSkipped > 0) {
     const breakdown = Object.entries(stats.injectedByKey)
       .map(([key, count]) => `${injectKeyLabel(key)}=${count}`)
       .join(", ");
     const marker = `[${stats.injectedSkipped} per-turn injection event(s) omitted: ${breakdown} (~${stats.injectedSkippedTokens} tokens)]`;
-    entries.unshift({ seq: firstInjectedSeq, text: marker, kind: "note" });
+    output.unshift({ seq: firstInjectedSeq, text: marker, kind: "note", score: weights.noteRow, reasons: ["injected-skipped"] });
     stats.entries += 1;
     stats.tokens += estimateEntryTokens(marker);
   }
-  return { entries, stats };
+  return { entries: output, stats };
 }
 
 /**
@@ -861,10 +937,17 @@ function scaleBudgets(budgets, factor) {
   return scaled;
 }
 
-/** Render the provenance range of one dropped-entry list. */
+/**
+ * Render the provenance range of one dropped-entry list.
+ *
+ * The rows are sorted first: elision order is value order, not seq order, and a
+ * marker like `seqs 5-2` is not merely cosmetic — it is a pointer the agent is
+ * told to paste back, and a descending range is rejected as malformed.
+ */
 function seqRangeOf(dropped) {
-  const first = dropped[0].seq;
-  const last = dropped[dropped.length - 1].seq;
+  const seqs = dropped.map((entry) => entry.seq).sort((a, b) => a - b);
+  const first = seqs[0];
+  const last = seqs[seqs.length - 1];
   return first === last ? `seq ${first}` : `seqs ${first}-${last}`;
 }
 
@@ -880,6 +963,7 @@ function seqRangeOf(dropped) {
  * @returns `{ entries, stats, capped }` — `capped` records cap enforcement.
  */
 export function compileRegion(nodes, config) {
+  const ranking = config.rankElision !== false;
   const baseBudgets = {
     textTokens: config.textTokens,
     userTextTokens: config.userTextTokens,
@@ -898,13 +982,22 @@ export function compileRegion(nodes, config) {
   let capped = false;
   if (result.stats.tokens > config.maxTokens) {
     const entries = result.entries;
-    // Phase A: drop the oldest low-value rows (tool/result/media/note)
+    // Phase A: drop the LOWEST-VALUE low-value rows (tool/result/media/note)
     // anywhere in the list first, so conversation text and prior-checkpoint
-    // knowledge survive elision before the logs do. The marker's seq range is
-    // the dropped rows' span (approximate: surviving text may sit inside it).
+    // knowledge survive elision before the logs do. Ranking replaces
+    // oldest-first here: a repeated poll or a scaffolding command leaves before
+    // an older file edit does (upstream `core/rank.ts`). The marker's seq range
+    // is the dropped rows' span (approximate: surviving text may sit inside it).
+    //
+    // The loop reserves the marker's own size before it is inserted: without
+    // that reserve the marker could push the checkpoint back over the cap and
+    // make Phase B evict conversation text to pay for a note about tool rows.
     const toolRows = [];
-    while (entries.length > 1 && result.stats.tokens > config.maxTokens) {
-      const index = entries.findIndex((entry, position) => position < entries.length - 1 && LOW_VALUE_KINDS.has(entry.kind));
+    const markerAllowance = estimateEntryTokens("[9999 tool/result entries elided: seqs 999999-999999]");
+    while (entries.length > 1 && result.stats.tokens + markerAllowance > config.maxTokens) {
+      const index = ranking
+        ? lowestValueIndex(entries, (entry) => LOW_VALUE_KINDS.has(entry.kind))
+        : entries.findIndex((entry, position) => position < entries.length - 1 && LOW_VALUE_KINDS.has(entry.kind));
       if (index === -1) break;
       const dropped = entries.splice(index, 1)[0];
       result.stats.tokens -= estimateEntryTokens(dropped.text);

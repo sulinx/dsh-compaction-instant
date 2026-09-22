@@ -52,6 +52,19 @@ Search patterns are caller-supplied, and a regular expression can be made to bac
 
 Every checkpoint also frames a short **RECALL guide** at its head, telling the model exactly how to use `recall` / `search` to recover elided content. When a prior checkpoint is elided under cap pressure it never vanishes silently: it leaves a single `[checkpoint N]` line (N = compaction ordinal, 1 = oldest), which `recall(type:"checkpoint", id:"N")` restores in full.
 
+**Rows are ranked, so cap pressure spends the budget where it pays.** Upstream `core/rank.ts` scored normalized blocks and kept the best ones; here every row is compiled first (nothing is dropped silently), so ranking decides *which* row leaves when the checkpoint cap bites, and which repeated rows collapse. Row value = recency + kind (user text > assistant text > tool > media/note) + tool shape (edits **34** > test commands **26** > workflow commands **14** > other **12** > reads **6** > scaffolding **−16**, with both the POSIX and PowerShell spellings of `cd`/`ls`/`echo`/`sleep` recognized) + a repeat penalty. Runs of three or more identical tool rows keep their first and last occurrence and collapse the middle into one `note` marker naming their seq range, which `recall` restores in full. `rankElision: false` restores the old oldest-first elision.
+
+That ranking came with a vocabulary fix: the shell tool on this host is `pwsh`, which used to render name-only — a row that records *that* a command ran, never *what* it did. `pwsh`, `ssh_exec`, `sftp_*`, `web_fetch_pro`, `web_search_pro`, `web_platform_search`, `browser_open/crawl`, `recall`, `search` and `touched_files` are now argument-bearing. Measured over **112 real compaction regions**:
+
+| | before | after |
+|---|---|---|
+| tool rows carrying a payload | 32.8% | **76.4%** |
+| compiled size (uncapped, same regions) | — | **+3.4%** |
+| high-value rows kept under a 40% cap | 11.6% | **19.8%** |
+| conversation text kept under a 40% cap | 100% | 100% |
+
+The elision marker now also reserves its own size before rows are dropped (a note about tool rows must never evict conversation text to pay for itself) and reports its span min–max even though rows are dropped in value order — a descending `seqs 5-2` would be a pointer the agent cannot paste back.
+
 **Every pointer the engine prints is a pointer it can resolve.** `indices` owns the whole reference space — how a seq maps to an event, how checkpoints are counted, and how a printed marker is parsed back — so the `#N` form the file renderer emits, the `(seq N)`/`(seqs A-B)` markers in a checkpoint, the `-> result N` tail of a tool line and a `[checkpoint N]` ordinal all paste back verbatim. Ranges wider than the expansion chunk are **chunked, not rejected**: a `[N entries elided: seqs A-B]` marker the agent cannot paste back would be a pointer that does not work (the total expansion is bounded instead, at 100,000 seqs). Measured on ten real session logs: **66,571 printed markers, 0 unresolvable** — except in a *seeded* session (see below).
 
 **A checkpoint carried in from another session's log is labelled, not silently mis-pointed.** A session seeded from a parent (`isSeeded`, e.g. a handoff or continued session) replays that parent's landed checkpoints verbatim, and their pointers address the **parent's** numbering — one measured seeded session had 273 such pointers out of ~2.8k in its inherited text, while every other session resolved 100%. The compiler cannot rewrite them (the parent log may be gone and the text must stay verbatim), so it prepends one line to that nested block: *"these seq pointers came from another session's log; use `search` to recover this block"*. `search` reaches that content regardless, and pointers minted in the current session are unaffected.

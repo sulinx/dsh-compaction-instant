@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseSeqSpec } from "../src/recall.js";
 import {
   DEFAULT_NOISE_PATTERNS,
   compileNoisePatterns,
@@ -11,6 +12,7 @@ import {
   compileRegion,
   countTokens,
   estimateDeepSeekTokens,
+  estimateEntryTokens,
   excerptToolResult,
   frameCheckpoint,
   isCheckpointSource,
@@ -290,7 +292,9 @@ test("compileRegion elides tool rows before conversation text", () => {
         role: "assistant",
         content: [
           { type: "text", text: `answer ${seq} ${"word ".repeat(200)}` },
-          { type: "tool-call", id: `c${seq}`, name: "read", arguments: '{"file_path":"a.js"}' }
+          // Distinct paths: identical rows are collapsed by the ranking pass
+          // before the cap is ever consulted (see the repeat-collapse test).
+          { type: "tool-call", id: `c${seq}`, name: "read", arguments: `{"file_path":"a${seq}.js"}` }
         ],
         source: { provider: "p", model: "m" }
       }
@@ -300,10 +304,14 @@ test("compileRegion elides tool rows before conversation text", () => {
       message: { role: "user", content: [{ type: "tool-result", toolCallId: `c${seq}`, content: [{ type: "text", text: `${"data ".repeat(200)} end ${seq}` }] }] }
     });
   }
-  // The cap binds below the rescale-converged total but above the total once
-  // enough tool rows are removed, so only low-value rows may be elided — the
+  // The cap is derived from the uncapped total so that removing HALF of the
+  // tool rows' tokens satisfies it: only low-value rows may be elided, and the
   // conversation text is rescaled but never removed.
-  const { entries, stats, capped } = compileRegion(nodes, { ...CONFIG, maxTokens: 565 });
+  const uncapped = compileRegion(nodes, { ...CONFIG, maxTokens: 1_000_000 });
+  const toolTokens = uncapped.entries
+    .filter((entry) => entry.kind === "tool")
+    .reduce((total, entry) => total + estimateEntryTokens(entry.text), 0);
+  const { entries, stats, capped } = compileRegion(nodes, { ...CONFIG, maxTokens: uncapped.stats.tokens - Math.ceil(toolTokens * 0.6) });
   assert.ok(capped, "cap enforcement ran");
   assert.ok(stats.elidedToolRows > 0, "low-value rows were elided first");
   assert.equal(stats.elidedRows, 0, "no conversation text was elided");
@@ -314,6 +322,72 @@ test("compileRegion elides tool rows before conversation text", () => {
     assert.match(text, new RegExp(`question ${seq}`), `user text ${seq} survives`);
     assert.match(text, new RegExp(`answer ${seq}`), `assistant text ${seq} survives`);
   }
+});
+
+test("compileRegion collapses repeated identical tool rows", () => {
+  // Eight identical `read a.js` calls: one durable fact, eight rows. The
+  // ranking pass keeps the first and last occurrence and replaces the middle
+  // with one marker whose seq range `recall` can restore in full.
+  const nodes = [];
+  for (let seq = 1; seq <= 8; seq += 1) {
+    nodes.push({ seq: seq * 2 - 1, message: { role: "user", content: [{ type: "text", text: `question ${seq}` }], source: { kind: "user" } } });
+    nodes.push({
+      seq: seq * 2,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: `answer ${seq}` },
+          { type: "tool-call", id: `c${seq}`, name: "read", arguments: '{"file_path":"a.js"}' }
+        ],
+        source: { provider: "p", model: "m" }
+      }
+    });
+    nodes.push({ seq: seq * 2 + 1, message: { role: "user", content: [{ type: "tool-result", toolCallId: `c${seq}`, content: [{ type: "text", text: "body" }] }] } });
+  }
+  const { entries, stats } = compileRegion(nodes, { ...CONFIG });
+  assert.equal(stats.collapsedRows, 6, "the middle six repeats collapsed");
+  const toolRows = entries.filter((entry) => entry.kind === "tool");
+  assert.equal(toolRows.length, 2, "first and last occurrence survive");
+  const marker = entries.find((entry) => /repeated read row\(s\) elided/.test(entry.text));
+  assert.notEqual(marker, undefined, "one marker names the collapsed span");
+  assert.equal(marker.kind, "note", "the marker is a droppable note row");
+});
+
+test("compileRegion drops the lowest-value low-value row, not the oldest", () => {
+  // One old high-value row (an edit) and six newer scaffolding commands. The
+  // cap forces several elisions; ranking must spend them on the scaffolding and
+  // keep the edit, which oldest-first elision would have sacrificed first.
+  const filler = "word ".repeat(200);
+  const nodes = [
+    { seq: 1, message: { role: "user", content: [{ type: "text", text: `q1 ${filler}` }], source: { kind: "user" } } },
+    { seq: 2, message: { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "edit", arguments: '{"file_path":"src/a.js"}' }], source: { provider: "p", model: "m" } } },
+    { seq: 3, message: { role: "user", content: [{ type: "tool-result", toolCallId: "c1", content: [{ type: "text", text: "ok" }] }] } },
+    { seq: 4, message: { role: "user", content: [{ type: "text", text: `q2 ${filler}` }], source: { kind: "user" } } }
+  ];
+  for (let i = 1; i <= 6; i += 1) {
+    const seq = 10 + i * 2;
+    nodes.push({ seq, message: { role: "assistant", content: [{ type: "tool-call", id: `p${i}`, name: "pwsh", arguments: `{"command":"cd K:\\\\dshwork\\\\_tmp\\\\branch${i}"}` }], source: { provider: "p", model: "m" } } });
+    nodes.push({ seq: seq + 1, message: { role: "user", content: [{ type: "tool-result", toolCallId: `p${i}`, content: [{ type: "text", text: "ok" }] }] } });
+  }
+  nodes.push({ seq: 99, message: { role: "assistant", content: [{ type: "text", text: `a2 ${filler}` }], source: { provider: "p", model: "m" } } });
+  const uncapped = compileRegion(nodes, { ...CONFIG, maxTokens: 1_000_000 });
+  // Price the scaffolding rows from the uncapped run and demand about half of
+  // them back: enough to force elision, not enough to exhaust them.
+  const scaffoldingTokens = uncapped.entries
+    .filter((entry) => entry.kind === "tool" && entry.seq >= 12)
+    .reduce((total, entry) => total + estimateEntryTokens(entry.text), 0);
+  const cap = uncapped.stats.tokens - Math.floor(scaffoldingTokens * 0.5);
+  const { entries, stats, capped } = compileRegion(nodes, { ...CONFIG, maxTokens: cap });
+  assert.ok(capped, "cap enforcement ran");
+  assert.ok(stats.elidedToolRows >= 1, "low-value rows paid for the cap");
+  assert.equal(entries.some((entry) => entry.seq === 2), true, "the older high-value edit survived");
+  const scaffoldingLeft = entries.filter((entry) => entry.kind === "tool" && entry.seq >= 12).length;
+  assert.ok(scaffoldingLeft < 6, "some scaffolding rows were elided");
+  // The marker's own range is a paste-able pointer: elision happens in value
+  // order, so it must be reported min-max rather than in drop order.
+  const marker = /\[(\d+) tool\/result entries elided: (seqs? [\d-]+)\]/.exec(entries.map((entry) => entry.text).join("\n"));
+  assert.notEqual(marker, null, "the elision marker is present");
+  assert.equal(parseSeqSpec(marker[2]).errors.length, 0, `marker range "${marker[2]}" parses back`);
 });
 
 test("compileRegion keeps a text floor when budgets collapse", () => {

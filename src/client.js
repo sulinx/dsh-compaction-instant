@@ -93,6 +93,8 @@ function instantCompactionClientFactory(require) {
     retainTokensHint: "保留区 token 硬上限：补足回合时永不超出；若最近回合本身就大于它，只保留其中能装下的部分（默认 5120）。",
     skipPerTurnInjections: "跳过每轮注入",
     skipPerTurnInjectionsHint: "不把宿主每轮重新注入的内容（运行上下文/记忆快照、技能目录）编进检查点：这些内容每次请求都会原样重发，且 append-only 日志仍可用 recall/search 取回。关闭则退回旧行为（实测旧行为下单个压缩区间有 73%–98% 的编译预算花在这类样板文本上）。",
+    rankElision: "相关性排序与重复折叠",
+    rankElisionHint: "按价值排序决定检查点超限时先丢哪一行（编辑/测试/工作流命令优先保留），并把重复的同一工具行折叠成一条备注。实测 112 个真实压缩区间：工具行带载荷比例 32.8%→76.4%（体积 +3.4%），40% 上限下高价值行保留率 11.6%→19.8%，对话正文 100% 保留。关闭则退回「从最旧的低价值行开始丢」。",
     overridden: "已覆盖",
     reset: "重置",
     invalidNumber: "必须是数字",
@@ -120,6 +122,8 @@ function instantCompactionClientFactory(require) {
     retainTokensHint: "Hard ceiling for the retained region: turn extension never exceeds it, and if the latest turn alone is bigger, only the part of it that fits is kept (default 5120).",
     skipPerTurnInjections: "Skip per-turn injections",
     skipPerTurnInjectionsHint: "Keep host per-turn injections (runtime-context/memory snapshot, skill catalog) out of checkpoints: they are re-sent verbatim on every request and stay recoverable via recall/search in the append-only log. Turn off for the old behavior (measured: 73%–98% of one real compaction span's compiled budget went to that boilerplate).",
+    rankElision: "Relevance ranking + repeat collapsing",
+    rankElisionHint: "Rank rows by value so cap pressure drops the least useful one first (edits, test runs and workflow commands stay), and collapse repeated identical tool rows into one marker. Measured over 112 real compaction regions: tool rows carrying a payload 32.8% → 76.4% for +3.4% tokens, and under a 40% cap high-value rows retained 11.6% → 19.8% with conversation text untouched. Turn off for the old oldest-first elision.",
     overridden: "Overridden",
     reset: "Reset",
     invalidNumber: "Must be a number",
@@ -503,6 +507,18 @@ function instantCompactionClientFactory(require) {
               onToggle: function (checked) { props.edit("skipPerTurnInjections", checked ? "true" : "false"); },
               onReset: function () { props.resetField("skipPerTurnInjections"); }
             }),
+            React.createElement(ToggleField, {
+              id: "plugin-config-instant-rank-elision",
+              label: t("rankElision"),
+              hint: t("rankElisionHint"),
+              overriddenLabel: t("overridden"),
+              resetLabel: t("reset"),
+              checked: state.rankElision.text === "true",
+              overridden: state.rankElision.overridden,
+              disabled: !state.writable,
+              onToggle: function (checked) { props.edit("rankElision", checked ? "true" : "false"); },
+              onReset: function () { props.resetField("rankElision"); }
+            }),
             React.createElement(
               "div",
               { className: "dsci_footer" },
@@ -542,7 +558,8 @@ function instantCompactionClientFactory(require) {
       numberField("thresholdRatio"),
       numberField("retainTurns"),
       numberField("retainTokens"),
-      booleanField("skipPerTurnInjections")
+      booleanField("skipPerTurnInjections"),
+      booleanField("rankElision")
     ]);
     var store = controller.bind(function () {
       var shell = controller.shell();
@@ -553,7 +570,8 @@ function instantCompactionClientFactory(require) {
         thresholdRatio: controller.field("thresholdRatio"),
         retainTurns: controller.field("retainTurns"),
         retainTokens: controller.field("retainTokens"),
-        skipPerTurnInjections: controller.field("skipPerTurnInjections")
+        skipPerTurnInjections: controller.field("skipPerTurnInjections"),
+        rankElision: controller.field("rankElision")
       };
     });
     ctx.slots.inject("settings.plugin.item", function* () {

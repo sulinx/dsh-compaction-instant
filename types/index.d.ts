@@ -98,6 +98,14 @@ export interface InstantCompactionConfig {
      * to skip nothing.
      */
     skipInjectTypes?: string[];
+    /**
+     * Relevance ranking and repeat collapsing (upstream `core/rank.ts`). When on,
+     * a checkpoint under cap pressure drops the least valuable low-value row
+     * first (edits, test runs and workflow commands stay) instead of the oldest,
+     * and runs of the same repeated tool row collapse into one marker naming
+     * their seq range. Default true.
+     */
+    rankElision?: boolean;
     /** Enable per-compile diagnostics to the debug log and stderr. Default false. */
     debug?: boolean;
     /** Debug log file path. Defaults to `$DSH_HOME/compaction-debug.log`. */
@@ -132,6 +140,8 @@ export interface ResolvedInstantCompactionConfig {
     readonly skipPerTurnInjections: boolean;
     /** Effective canonical injection keys dropped from the compiled view (empty when disabled). */
     readonly skipInjectTypes: readonly string[];
+    /** Whether relevance ranking and repeat collapsing drive cap elision. */
+    readonly rankElision: boolean;
     readonly debug: boolean;
     readonly debugLogPath: string;
     /** File-appending line sink installed when `debug` is enabled. */

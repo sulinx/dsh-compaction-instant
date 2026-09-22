@@ -76,6 +76,13 @@ test("resolveConfig treats schemastery-injected empty arrays as unset", () => {
   assert.deepEqual(config.noisePatterns, compileNoisePatterns(DEFAULT_NOISE_PATTERNS));
 });
 
+test("rankElision defaults on, is configurable, and is validated", () => {
+  assert.equal(resolveConfig({}).rankElision, true);
+  assert.equal(resolveConfig({ rankElision: false }).rankElision, false);
+  assert.equal(resolveConfig({ rankElision: true }).rankElision, true);
+  assert.throws(() => resolveConfig({ rankElision: "off" }), /rankElision/);
+});
+
 test("resolveConfig debug defaults off and installs a file sink when on", () => {
   assert.equal(resolveConfig({}).debug, false);
   assert.equal(resolveConfig({}).debugSink, undefined);
