@@ -17,7 +17,7 @@ Upstream was archived on 2026-09-02, so these fixes are maintained here.
 
 | file | sha16 (with patches applied) |
 |---|---|
-| `src/region.js` | `338120A611CDA547` |
+| `src/region.js` | `6F843C543DA9166A` (was `338120A611CDA547` before the boundary guard below) |
 | `src/index.js` | `1BF8DD6EEA9EA1F8` (was `A1978BD0D4297557` before the 0.1.7 adaptation below) |
 | `src/recall.js` | `41696141C6052B9E` (was `149567516934D9F4` before the P1 port below) |
 | `src/search.js` | `83CAC25D83CA7A34` (was `47433C94C4A10DEC` after P0, `8223DABA1FCE557F` before it) |
@@ -43,6 +43,21 @@ nothing is lost; the streaming scanner bounds memory without dropping a match. U
 `core/jsonl.ts` file reader also has no call site here — the host hands the engine a live event log,
 never a file — so what is ported is the property it exists for (bounded materialization), not the
 file-level API.
+
+## Local correctness fix: region-selection boundary (found during P1 verification)
+
+`selectCompactableRange` (`src/region.js`) sets the keep-boundary to `turns.length` when the **newest
+surface node alone exceeds `retainTokens`** — which is what a large `/recall` output looks like once it
+has been appended as one durable user message. The tool-pairing guard below then read
+`surfaceNodes[keepFromIdx]`, one index past the end, and passed `undefined` to the host's
+`toolPairingBalancedBefore`: `/compact` failed with `gateway/internal: tool-pairing balance: surface
+seq undefined not found`. Reproduced with the pre-P1 sources on the same session, so this is latent,
+not a regression from the P1 port.
+
+The guard now treats an out-of-range boundary as "not balanced yet" and recedes, which retains the
+oversized newest node instead of failing the whole compaction. The branch can only be reached where
+the old code threw, so no currently-working selection changes; `test/region-boundary.test.js` pins all
+three cases (oversized newest node, longer surface, normal selection).
 
 ## Host-compatibility adaptation for dsh 0.1.7 (patch #7)
 

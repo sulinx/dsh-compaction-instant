@@ -123,7 +123,15 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
     while (keepFromIdx < turns.length && turns[keepFromIdx] < mandatoryTurnFloor) keepFromIdx += 1;
   }
   while (keepFromIdx > 0) {
-    if (toolPairingBalancedBefore(session, surfaceNodes[keepFromIdx])) break;
+    // `keepFromIdx` is a keep-boundary index, so it can legitimately sit at
+    // `turns.length` (the ceiling loop above keeps nothing when the newest
+    // surface node alone exceeds `retainTokens` — e.g. a large `/recall` output
+    // appended as one message). There is no node at that index: the host's
+    // `toolPairingBalancedBefore` rejects an unknown seq, so treat an
+    // out-of-range boundary as "not balanced yet" and recede, which retains the
+    // oversized newest node instead of failing the whole compaction.
+    const boundarySeq = surfaceNodes[keepFromIdx];
+    if (boundarySeq !== undefined && toolPairingBalancedBefore(session, boundarySeq)) break;
     keepFromIdx -= 1;
   }
   if (keepFromIdx === 0) return null;
