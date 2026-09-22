@@ -66,9 +66,14 @@ export function parseSeqSpec(input) {
  * Recall is the lossless layer, so nothing is elided here except media,
  * which renders as labels (their bytes live in the attachment service).
  * @param message - derived message (`Session.deriveEventMessage` output).
+ * @param options - `{ skipToolCalls }`: tool names whose call arguments are left
+ *   out of the projection. Recall never skips anything; the search index uses
+ *   it to exclude this plugin's own read-back surface, whose invocation
+ *   arguments would otherwise make a repeated query match itself.
  * @returns full plain-text projection.
  */
-export function projectMessageText(message) {
+export function projectMessageText(message, options = {}) {
+  const skipToolCalls = options.skipToolCalls;
   const parts = [];
   for (const block of message.content) {
     switch (block.type) {
@@ -78,9 +83,12 @@ export function projectMessageText(message) {
       case "reasoning":
         if (block.text !== undefined && block.text.length > 0) parts.push(`[reasoning]\n${sanitize(block.text)}`);
         break;
-      case "tool-call":
-        parts.push(`[tool-call ${block.name ?? "unknown"}]\n${sanitize(block.arguments ?? "")}`);
+      case "tool-call": {
+        const toolName = block.name ?? "unknown";
+        if (skipToolCalls !== undefined && skipToolCalls.includes(toolName)) break;
+        parts.push(`[tool-call ${toolName}]\n${sanitize(block.arguments ?? "")}`);
         break;
+      }
       case "tool-result":
         parts.push(`[tool-result]\n${projectToolResultText(block.content ?? [])}`);
         break;
@@ -196,6 +204,10 @@ export function resolveRecallReference(session, type, id) {
  */
 export function recallSession(session, selections, config) {
   const maxRecallTokens = config.maxRecallTokens;
+  // One materialization for the whole call: a per-seq `sessionEvents(session)`
+  // inside the loop below is cheap only while the host caches its snapshot, and
+  // a wide selection over a large log must not depend on that.
+  const events = sessionEvents(session);
   const requested = expandSelections(selections);
   const entries = [];
   const seqs = [];
@@ -210,7 +222,7 @@ export function recallSession(session, selections, config) {
       truncated = true;
       break;
     }
-    const event = sessionEvents(session)[seq];
+    const event = events[seq];
     if (event === undefined || event.seq !== seq) {
       missing += 1;
       entries.push({ seq, text: `[seq ${seq}: not found in this session]` });

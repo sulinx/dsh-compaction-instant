@@ -50,7 +50,11 @@ export interface RecallableSession {
 /** Parse one seq selection string into ordered inclusive ranges. */
 export declare function parseSeqSpec(input: string): { selections: SeqSelection[]; errors: string[] };
 /** Project one derived message into full plain text (nothing elided but media). */
-export declare function projectMessageText(message: { role: string; content: readonly unknown[] }): string;
+export declare function projectMessageText(
+    message: { role: string; content: readonly unknown[] },
+    /** `skipToolCalls`: tool names whose call arguments are left out (search excludes its own surface). */
+    options?: { skipToolCalls?: readonly string[] }
+): string;
 /** Expand ordered selections into a deduplicated ordered seq list. */
 export declare function expandSelections(selections: readonly SeqSelection[]): number[];
 /** Collect the seqs of every landed checkpoint node, oldest first (1 = oldest compaction). */

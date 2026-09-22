@@ -1,6 +1,7 @@
 /**
- * Model-facing same-session recall tool types: `recall` (typed restore) and
- * `search` (keyword/regex grep) over the durable log.
+ * Model-facing same-session recall tool types: `recall` (typed restore),
+ * `search` (keyword/regex/ranked search) and `touched_files` (files touched)
+ * over the durable log.
  * @module dsh-compaction-instant/tool
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -25,5 +26,11 @@ export declare function resolveConfig(config?: ToolRecallConfig): Required<ToolR
 export declare function apply(ctx: Context, config?: ToolRecallConfig): void;
 /** The typed `recall` tool definition (type: seq | result | checkpoint). */
 export declare function defineRecallTool(config: Required<ToolRecallConfig>): ToolDefinition;
-/** The grep `search` tool definition (for tests and introspection). */
+/** The `search` tool definition (regex, keyword or ranked multi-term). */
 export declare function defineSearchTool(config: Required<ToolRecallConfig>): ToolDefinition;
+/** The `touched_files` tool definition (paginated files touched). */
+export declare function defineTouchedTool(config: Required<ToolRecallConfig>): ToolDefinition;
+/** Tool descriptions, exported for documentation and tests. */
+export declare const RECALL_DESCRIPTION: string;
+export declare const SEARCH_DESCRIPTION: string;
+export declare const TOUCHED_DESCRIPTION: string;

@@ -1,5 +1,6 @@
 /**
- * Human `/recall` command types (grep-based search over the durable log).
+ * Human `/recall` command types (`/recall <keyword|regex>` search and
+ * `/recall files [page]` over the durable log).
  * @module dsh-compaction-instant/command
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -9,6 +10,8 @@ import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
 export declare const name: 'command-recall';
 /** Service required before the companion can register. */
 export declare const inject: string[];
+/** Usage line shown when the command is invoked without input. */
+export declare const USAGE: string;
 /** Command plugin configuration. */
 export interface CommandRecallConfig {
     /** Total budget for one search result, in density-aware tokens. Default 16000. */

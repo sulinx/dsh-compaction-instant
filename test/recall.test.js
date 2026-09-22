@@ -414,11 +414,11 @@ test("recall tool and command apply plugins register and dispose through cordis"
     applyCommand(ctx, {});
   });
   await fiber;
-  assert.deepEqual(registrations.tools.map((tool) => tool.name).sort(), ["recall", "search"]);
+  assert.deepEqual(registrations.tools.map((tool) => tool.name).sort(), ["recall", "search", "touched_files"]);
   assert.equal(registrations.commands.length, 1);
   assert.equal(registrations.commands[0].name, "recall");
   await fiber.dispose();
-  assert.equal(disposals.tools, 2);
+  assert.equal(disposals.tools, 3);
   assert.equal(disposals.commands, 1);
 });
 

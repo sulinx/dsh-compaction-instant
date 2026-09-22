@@ -26,6 +26,10 @@
       "types": "./types/search.d.ts",
       "default": "./src/search.js"
     },
+    "./format": {
+      "types": "./types/format.d.ts",
+      "default": "./src/format.js"
+    },
     "./tool": {
       "types": "./types/tool.d.ts",
       "default": "./src/tool.js"
@@ -49,7 +53,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/tool.js && node --check src/command.js && node --check src/client.js"
+    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/format.js && node --check src/tool.js && node --check src/command.js && node --check src/client.js"
   },
   "engines": {
     "node": ">=18"
