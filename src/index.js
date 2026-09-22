@@ -353,6 +353,23 @@ const summarizationModelSchema = z.string();
 const maxTokensSchema = z.number().step(1).min(1);
 const compactionRetriesSchema = z.number().step(1).min(0);
 const maxOverflowRetriesSchema = z.number().step(1).min(0);
+
+/**
+ * Mark one Config field as user-editable in the host's settings UI.
+ *
+ * dsh 0.1.7 replaced the namespace-registration seam (`ctx.settings.register`)
+ * with Config-derived forms: a plugin exposes a field by marking it `volatile()`
+ * in its own Config schema, and the form is addressed by the profile entry id.
+ * schemastery only gained `volatile()` in 3.18.3, so on older hosts (0.1.6 and
+ * below) this is an identity function and the legacy `SETTINGS_NAMESPACE` /
+ * `SETTINGS_SCHEMA` seam carries the user layer instead.
+ * @param schema - one Config field schema.
+ * @returns the same field, marked volatile when the host supports it.
+ */
+function volatileField(schema) {
+  return typeof schema?.volatile === "function" ? schema.volatile() : schema;
+}
+
 const modelPolicy = z.object({
   provider: z.string().required(),
   model: z.string().required(),
@@ -403,18 +420,18 @@ export class InstantCompactionEngine extends CompactionEngine {
     "sessions"
   ];
   static Config = z.object({
-    thresholdRatio: thresholdRatioSchema,
-    retainTurns: retainTurnsSchema,
-    retainTokens: retainTokensSchema,
+    thresholdRatio: volatileField(thresholdRatioSchema),
+    retainTurns: volatileField(retainTurnsSchema),
+    retainTokens: volatileField(retainTokensSchema),
     checkpointScale: checkpointScaleSchema,
-    checkpointCap: checkpointCapSchema,
+    checkpointCap: volatileField(checkpointCapSchema),
     summarizationProvider: summarizationProviderSchema,
     summarizationModel: summarizationModelSchema,
     maxTokens: maxTokensSchema,
     compactionRetries: compactionRetriesSchema,
     maxOverflowRetries: maxOverflowRetriesSchema,
     modelPolicies: z.array(modelPolicy),
-    auto: z.boolean(),
+    auto: volatileField(z.boolean()),
     textTokens: maxTokensSchema,
     userTextTokens: maxTokensSchema,
     toolCallTokens: maxTokensSchema,
@@ -428,7 +445,7 @@ export class InstantCompactionEngine extends CompactionEngine {
     debug: z.boolean(),
     debugLogPath: z.string()
   });
-  /** Settings namespace for user-owned instant-compaction preferences. */
+  /** Legacy settings namespace (dsh <= 0.1.6); 0.1.7 addresses forms by entry id. */
   static SETTINGS_NAMESPACE = "compaction-instant";
   /**
    * Settings-exposed subset of the engine configuration. Defaults mirror the
@@ -472,11 +489,17 @@ export class InstantCompactionEngine extends CompactionEngine {
   }
   /**
    * Mount the optional settings namespace over this engine's configuration
-   * source. With a settings service present, the user layer (settings.yaml)
-   * overlays the composition entry's exposed subset; without one, the engine
-   * keeps reading the entry exactly as composed. The whole engine validation
-   * runs on every settings write, so a value that would break the engine is
-   * refused before it is persisted.
+   * source, when the host still provides that seam. With a settings service
+   * present, the user layer (settings.yaml) overlays the composition entry's
+   * exposed subset; without one, the engine keeps reading the entry exactly as
+   * composed. The whole engine validation runs on every settings write, so a
+   * value that would break the engine is refused before it is persisted.
+   *
+   * dsh 0.1.7 replaced `settings.register(namespace, schema, options)` with
+   * Config-derived forms (`SettingsForms`: `describe`/`update`/`replace`/
+   * `mutate`, addressed by profile entry id). There is no namespace seam left to
+   * mount, so this hook becomes a no-op there and the volatile Config fields in
+   * `InstantCompactionEngine.Config` expose the same subset instead.
    */
   _installSettingsSection(ctx) {
     const entry = this.entry;
@@ -485,7 +508,9 @@ export class InstantCompactionEngine extends CompactionEngine {
     // through ctx.settings when the service exists; otherwise keep the
     // composition entry as the config source.
     ctx.inject(["settings"], (scoped) => {
-      const scope = scoped.settings.register(
+      const settings = scoped.settings;
+      if (settings === undefined || typeof settings.register !== "function") return;
+      const scope = settings.register(
         InstantCompactionEngine.SETTINGS_NAMESPACE,
         InstantCompactionEngine.SETTINGS_SCHEMA,
         {

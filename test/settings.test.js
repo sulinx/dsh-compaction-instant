@@ -60,3 +60,54 @@ test("settings values feed the engine through resolveConfig", () => {
   assert.equal(engine.config.maxTokens, 4096);
   assert.equal(engine.config.checkpointCap, 65536);
 });
+
+/** Yield once so a deferred cordis inject callback can run. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("Config still resolves with the settings-exposed fields marked volatile", () => {
+  // `volatileField` is an identity function on hosts whose schemastery predates
+  // 0.1.7; on 0.1.7 it marks the field so the Config-derived settings form can
+  // edit it. Either way the engine's Config must validate and coerce the same.
+  const resolved = InstantCompactionEngine.Config({ checkpointCap: 1024, auto: false, thresholdRatio: 0.25 });
+  assert.equal(resolved.checkpointCap, 1024);
+  assert.equal(resolved.auto, false);
+  assert.equal(resolved.thresholdRatio, 0.25);
+});
+
+test("the legacy settings namespace still mounts when the host provides register", async () => {
+  const calls = [];
+  const ctx = new Context();
+  ctx.provide("settings", {
+    register: (namespace, schema, options) => {
+      calls.push({ namespace, schema, options });
+      return { get: () => ({ checkpointCap: 2048 }), watch: () => {} };
+    }
+  });
+  const engine = new InstantCompactionEngine(ctx, {});
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].namespace, "compaction-instant");
+  assert.equal(calls[0].schema, InstantCompactionEngine.SETTINGS_SCHEMA);
+  assert.equal(engine.config.checkpointCap, 2048);
+});
+
+test("a 0.1.7 settings service (no register seam) mounts nothing and does not throw", async () => {
+  // dsh 0.1.7 replaced `ctx.settings.register(...)` with Config-derived forms
+  // (`SettingsForms`: describe/update/replace/mutate, addressed by entry id).
+  // The engine must fall back to the composition entry instead of throwing
+  // inside the inject callback.
+  const ctx = new Context();
+  ctx.provide("settings", {
+    describe: () => [],
+    update: async () => {},
+    replace: async () => {},
+    mutate: async () => {},
+    configure: () => () => {}
+  });
+  const engine = new InstantCompactionEngine(ctx, { checkpointCap: 4096 });
+  await flush();
+  assert.equal(engine.config.checkpointCap, 4096);
+  assert.equal(engine.config.auto, true);
+  assert.equal(engine.config.thresholdRatio, 0.5);
+  assert.equal(engine.config.retainTokens, 5120);
+});

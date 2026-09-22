@@ -18,7 +18,7 @@ Upstream was archived on 2026-09-02, so these fixes are maintained here.
 | file | sha16 (with patches applied) |
 |---|---|
 | `src/region.js` | `338120A611CDA547` |
-| `src/index.js` | `A1978BD0D4297557` |
+| `src/index.js` | `1BF8DD6EEA9EA1F8` (was `A1978BD0D4297557` before the 0.1.7 adaptation below) |
 | `src/recall.js` | `149567516934D9F4` |
 | `src/search.js` | `47433C94C4A10DEC` (was `8223DABA1FCE557F` before the P0 port below) |
 | `src/client.js` | `4A662939016E1B0A` |
@@ -31,6 +31,25 @@ and any intentional change here must update the tracking manifest in the same co
 | batch | upstream source (`reference/pi-vcc-v0.8.0/src/...`) | what was ported | files touched |
 |---|---|---|---|
 | **P0 · ReDoS guard** | `core/search-entries.ts` (`quantifierAt`, `hasNestedQuantifier`, `startBudget`, `SEARCH_BUDGET_MS`) | A search pattern that applies an unbounded quantifier to a group that already contains one (`(a+)+`, `(\w*)*`, `(a{2,})+`) is now matched **literally** instead of compiled — same query, no exponential backtracking. A wall-clock budget (default 3000 ms, `searchBudgetMs`) is checked between events and every 512 scanned lines and aborts the search with `SearchBudgetExceededError` for shapes the structural guard cannot see (`(a|a)+`). Both guards only touch the `search` / `/recall` read path; the compiler never matches caller-supplied regexes. | `src/search.js`, `src/tool.js`, `src/command.js`, `types/search.d.ts`, `types/tool.d.ts`, `types/command.d.ts` |
+
+## Host-compatibility adaptation for dsh 0.1.7 (patch #7)
+
+dsh 0.1.7 **rewrote `@deepseek-ai/dsh-settings`**: the namespace seam this engine used
+(`ctx.settings.register(namespace, schema, { base, validate })`) is gone, replaced by Config-derived
+forms (`SettingsForms`: `describe`/`update`/`replace`/`mutate`, addressed by **profile entry id**, with
+fields exposed by marking them `.volatile()` in the plugin's own Config schema — schemastery gained
+`volatile()` in 3.18.3). `src/index.js` now:
+
+1. guards the legacy seam (`typeof settings.register === "function"`) so a 0.1.7 host cannot throw inside
+   the inject callback, and keeps reading the composition entry as its config source there; and
+2. marks exactly the legacy `SETTINGS_SCHEMA` surface (`checkpointCap`, `auto`, `thresholdRatio`,
+   `retainTurns`, `retainTokens`) volatile through a feature-detected helper, so on 0.1.7 those fields
+   project into a settings form if the row is mounted at the profile top level.
+
+Verified against a real 0.1.7-alpha.1 harness (`iso017` profile, isolated `DSH_HOME`): boot clean,
+`/compact` and `/recall "(a+)+$"` both work, and `Config.toJSON()` marks exactly those five fields.
+No other imported host API changed (see `_updates/20260922-p0-search-redos/api-diff-016-vs-017.mjs`).
+
 
 
 ## Rules when porting upstream changes
