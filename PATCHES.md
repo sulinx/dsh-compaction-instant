@@ -20,11 +20,18 @@ Upstream was archived on 2026-09-02, so these fixes are maintained here.
 | `src/region.js` | `338120A611CDA547` |
 | `src/index.js` | `A1978BD0D4297557` |
 | `src/recall.js` | `149567516934D9F4` |
-| `src/search.js` | `8223DABA1FCE557F` |
+| `src/search.js` | `47433C94C4A10DEC` (was `8223DABA1FCE557F` before the P0 port below) |
 | `src/client.js` | `4A662939016E1B0A` |
 
 These fingerprints are the reference for any deployment that tracks this fork: a deployed copy must match them,
 and any intentional change here must update the tracking manifest in the same commit.
+
+## Ported upstream improvements (algorithm/robustness, not host compatibility)
+
+| batch | upstream source (`reference/pi-vcc-v0.8.0/src/...`) | what was ported | files touched |
+|---|---|---|---|
+| **P0 · ReDoS guard** | `core/search-entries.ts` (`quantifierAt`, `hasNestedQuantifier`, `startBudget`, `SEARCH_BUDGET_MS`) | A search pattern that applies an unbounded quantifier to a group that already contains one (`(a+)+`, `(\w*)*`, `(a{2,})+`) is now matched **literally** instead of compiled — same query, no exponential backtracking. A wall-clock budget (default 3000 ms, `searchBudgetMs`) is checked between events and every 512 scanned lines and aborts the search with `SearchBudgetExceededError` for shapes the structural guard cannot see (`(a|a)+`). Both guards only touch the `search` / `/recall` read path; the compiler never matches caller-supplied regexes. | `src/search.js`, `src/tool.js`, `src/command.js`, `types/search.d.ts`, `types/tool.d.ts`, `types/command.d.ts` |
+
 
 ## Rules when porting upstream changes
 

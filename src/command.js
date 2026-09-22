@@ -11,7 +11,7 @@
  */
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { DEFAULT_MAX_RECALL_TOKENS } from "./recall.js";
-import { DEFAULT_MAX_SEARCH_HITS, InvalidSearchPatternError, searchSession } from "./search.js";
+import { DEFAULT_MAX_SEARCH_HITS, InvalidSearchPatternError, SEARCH_BUDGET_MS, SearchBudgetExceededError, searchSession } from "./search.js";
 
 export const name = "command-recall";
 export const inject = ["commands"];
@@ -21,9 +21,11 @@ export const USAGE = "Usage: /recall <keyword|regex>";
 export function resolveConfig(config = {}) {
   const maxRecallTokens = config.maxRecallTokens ?? DEFAULT_MAX_RECALL_TOKENS;
   const maxSearchHits = config.maxSearchHits ?? DEFAULT_MAX_SEARCH_HITS;
+  const searchBudgetMs = config.searchBudgetMs ?? SEARCH_BUDGET_MS;
   if (typeof maxRecallTokens !== "number" || !Number.isInteger(maxRecallTokens) || maxRecallTokens <= 0) throw new Error("CommandRecallConfig: maxRecallTokens must be a positive integer");
   if (typeof maxSearchHits !== "number" || !Number.isInteger(maxSearchHits) || maxSearchHits <= 0) throw new Error("CommandRecallConfig: maxSearchHits must be a positive integer");
-  return { maxRecallTokens, maxSearchHits };
+  if (typeof searchBudgetMs !== "number" || !Number.isFinite(searchBudgetMs) || searchBudgetMs <= 0) throw new Error("CommandRecallConfig: searchBudgetMs must be a positive number");
+  return { maxRecallTokens, maxSearchHits, searchBudgetMs };
 }
 
 /** Execute one grep-based recall request against the calling agent's session. */
@@ -37,7 +39,7 @@ async function executeRecall(invocation, resolved) {
   try {
     result = searchSession(invocation.agent.session, pattern, resolved);
   } catch (error) {
-    if (error instanceof InvalidSearchPatternError) return {
+    if (error instanceof InvalidSearchPatternError || error instanceof SearchBudgetExceededError) return {
       kind: "error",
       text: error.message
     };
@@ -73,7 +75,7 @@ async function executeRecall(invocation, resolved) {
 
 /**
  * Build the `recall` command definition (for tests and introspection).
- * @param resolved - validated `{ maxRecallTokens, maxSearchHits }`.
+ * @param resolved - validated `{ maxRecallTokens, maxSearchHits, searchBudgetMs }`.
  * @returns a registry-ready CommandDefinition.
  */
 export function defineRecallCommand(resolved) {

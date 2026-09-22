@@ -15,6 +15,8 @@ export interface CommandRecallConfig {
     maxRecallTokens?: number;
     /** Cap on shown matching events per search. Default 50. */
     maxSearchHits?: number;
+    /** Wall-clock budget for one search, in milliseconds. Default 3000. */
+    searchBudgetMs?: number;
 }
 /** Validate and default the command plugin configuration. */
 export declare function resolveConfig(config?: CommandRecallConfig): Required<CommandRecallConfig>;

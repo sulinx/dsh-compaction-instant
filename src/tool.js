@@ -21,7 +21,7 @@
 import { HarnessError } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_MAX_RECALL_TOKENS, recallSession, resolveRecallReference } from "./recall.js";
-import { DEFAULT_MAX_SEARCH_HITS, InvalidSearchPatternError, searchSession } from "./search.js";
+import { DEFAULT_MAX_SEARCH_HITS, InvalidSearchPatternError, SEARCH_BUDGET_MS, SearchBudgetExceededError, searchSession } from "./search.js";
 
 export const name = "tool-recall";
 export const inject = ["tools"];
@@ -30,14 +30,16 @@ export const inject = ["tools"];
 export function resolveConfig(config = {}) {
   const maxRecallTokens = config.maxRecallTokens ?? DEFAULT_MAX_RECALL_TOKENS;
   const maxSearchHits = config.maxSearchHits ?? DEFAULT_MAX_SEARCH_HITS;
+  const searchBudgetMs = config.searchBudgetMs ?? SEARCH_BUDGET_MS;
   if (typeof maxRecallTokens !== "number" || !Number.isInteger(maxRecallTokens) || maxRecallTokens <= 0) throw new Error("ToolRecallConfig: maxRecallTokens must be a positive integer");
   if (typeof maxSearchHits !== "number" || !Number.isInteger(maxSearchHits) || maxSearchHits <= 0) throw new Error("ToolRecallConfig: maxSearchHits must be a positive integer");
-  return { maxRecallTokens, maxSearchHits };
+  if (typeof searchBudgetMs !== "number" || !Number.isFinite(searchBudgetMs) || searchBudgetMs <= 0) throw new Error("ToolRecallConfig: searchBudgetMs must be a positive number");
+  return { maxRecallTokens, maxSearchHits, searchBudgetMs };
 }
 
 const RECALL_DESCRIPTION = "Restore the exact original content of earlier events in THIS conversation by a typed reference. type=\"seq\" with a seq selection id (\"3-7,15\", \"seq 12\", \"seqs 3-7\" — the checkpoint marker forms) restores those events; type=\"result\" with the \"result N\" pointer from a tool-call one-liner (\"result 3\" or \"3\") restores that tool result; type=\"checkpoint\" with an ordinal (\"1\" = oldest, as in a \"[checkpoint N]\" elision line) or a \"seq N\" pointer restores that full checkpoint. The durable log is append-only, so recalled content is always the original tokens. To find events by keyword or regex instead, use the search tool.";
 
-const SEARCH_DESCRIPTION = "Search THIS conversation's durable event log by keyword or regular expression (case-insensitive, Unicode-aware). Every event ever recorded is searchable, including content elided or truncated by compaction checkpoints — the log is append-only and untouched. Returns the matching events with their (seq N) seq numbers and the matching lines. Then call recall with a (seq N) pointer to restore any hit's full exact original content. Escape regex special characters (e.g. use \\\\( for a literal parenthesis).";
+const SEARCH_DESCRIPTION = "Search THIS conversation's durable event log by keyword or regular expression (case-insensitive, Unicode-aware). Every event ever recorded is searchable, including content elided or truncated by compaction checkpoints — the log is append-only and untouched. Returns the matching events with their (seq N) seq numbers and the matching lines. Then call recall with a (seq N) pointer to restore any hit's full exact original content. Escape regex special characters (e.g. use \\\\( for a literal parenthesis). A pattern that nests unbounded quantifiers (such as (a+)+) is matched literally rather than as a regex, and a search that outruns its time budget is aborted with an error.";
 
 const RECALL_OUTPUT = {
   schema: {
@@ -123,7 +125,7 @@ export function defineRecallTool(resolved) {
 
 /**
  * Build the `search` (grep) tool definition against one resolved config.
- * @param resolved - validated `{ maxRecallTokens, maxSearchHits }`.
+ * @param resolved - validated `{ maxRecallTokens, maxSearchHits, searchBudgetMs }`.
  * @returns a registry-ready ToolDefinition.
  */
 export function defineSearchTool(resolved) {
@@ -146,6 +148,7 @@ export function defineSearchTool(resolved) {
         result = searchSession(agent.session, args.pattern, resolved);
       } catch (error) {
         if (error instanceof InvalidSearchPatternError) throw new HarnessError(error.message, "SEARCH_INVALID_PATTERN", { cause: error });
+        if (error instanceof SearchBudgetExceededError) throw new HarnessError(error.message, "SEARCH_BUDGET_EXCEEDED", { cause: error });
         throw error;
       }
       return {
@@ -169,7 +172,7 @@ export function defineSearchTool(resolved) {
 /**
  * Register the recall tools (`recall` restore + `search` grep).
  * @param ctx - context carrying the tools service.
- * @param config - `{ maxRecallTokens?, maxSearchHits? }`.
+ * @param config - `{ maxRecallTokens?, maxSearchHits?, searchBudgetMs? }`.
  * @returns the installed registrations' combined disposer.
  */
 export function apply(ctx, config) {
