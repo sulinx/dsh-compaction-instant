@@ -90,7 +90,9 @@ function instantCompactionClientFactory(require) {
     retainTurns: "保留回合数",
     retainTurnsHint: "优先保留最近 N 个完整回合（默认 1）。",
     retainTokens: "保留 token 上限",
-    retainTokensHint: "保留区 token 硬上限：补足回合时永不超出；若最近回合本身就超过它，只保留其中能装下的部分（默认 5120）。",
+    retainTokensHint: "保留区 token 硬上限：补足回合时永不超出；若最近回合本身就大于它，只保留其中能装下的部分（默认 5120）。",
+    skipPerTurnInjections: "跳过每轮注入",
+    skipPerTurnInjectionsHint: "不把宿主每轮重新注入的内容（运行上下文/记忆快照、技能目录）编进检查点：这些内容每次请求都会原样重发，且 append-only 日志仍可用 recall/search 取回。关闭则退回旧行为（实测旧行为下单个压缩区间有 73%–98% 的编译预算花在这类样板文本上）。",
     overridden: "已覆盖",
     reset: "重置",
     invalidNumber: "必须是数字",
@@ -116,6 +118,8 @@ function instantCompactionClientFactory(require) {
     retainTurnsHint: "Prefer the last N complete turns (default 1).",
     retainTokens: "Retained-token ceiling",
     retainTokensHint: "Hard ceiling for the retained region: turn extension never exceeds it, and if the latest turn alone is bigger, only the part of it that fits is kept (default 5120).",
+    skipPerTurnInjections: "Skip per-turn injections",
+    skipPerTurnInjectionsHint: "Keep host per-turn injections (runtime-context/memory snapshot, skill catalog) out of checkpoints: they are re-sent verbatim on every request and stay recoverable via recall/search in the append-only log. Turn off for the old behavior (measured: 73%–98% of one real compaction span's compiled budget went to that boilerplate).",
     overridden: "Overridden",
     reset: "Reset",
     invalidNumber: "Must be a number",
@@ -487,6 +491,18 @@ function instantCompactionClientFactory(require) {
               onEdit: function (text) { props.edit("retainTokens", text); },
               onReset: function () { props.resetField("retainTokens"); }
             }),
+            React.createElement(ToggleField, {
+              id: "plugin-config-instant-skip-injections",
+              label: t("skipPerTurnInjections"),
+              hint: t("skipPerTurnInjectionsHint"),
+              overriddenLabel: t("overridden"),
+              resetLabel: t("reset"),
+              checked: state.skipPerTurnInjections.text === "true",
+              overridden: state.skipPerTurnInjections.overridden,
+              disabled: !state.writable,
+              onToggle: function (checked) { props.edit("skipPerTurnInjections", checked ? "true" : "false"); },
+              onReset: function () { props.resetField("skipPerTurnInjections"); }
+            }),
             React.createElement(
               "div",
               { className: "dsci_footer" },
@@ -525,7 +541,8 @@ function instantCompactionClientFactory(require) {
       booleanField("auto"),
       numberField("thresholdRatio"),
       numberField("retainTurns"),
-      numberField("retainTokens")
+      numberField("retainTokens"),
+      booleanField("skipPerTurnInjections")
     ]);
     var store = controller.bind(function () {
       var shell = controller.shell();
@@ -535,7 +552,8 @@ function instantCompactionClientFactory(require) {
         auto: controller.field("auto"),
         thresholdRatio: controller.field("thresholdRatio"),
         retainTurns: controller.field("retainTurns"),
-        retainTokens: controller.field("retainTokens")
+        retainTokens: controller.field("retainTokens"),
+        skipPerTurnInjections: controller.field("skipPerTurnInjections")
       };
     });
     ctx.slots.inject("settings.plugin.item", function* () {

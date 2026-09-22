@@ -68,6 +68,12 @@ export interface CompileStats {
     elidedToolRows: number;
     /** Remaining entries dropped by the second (oldest-first) elision pass. */
     elidedRows: number;
+    /** Per-turn injection nodes dropped from the compiled view. */
+    injectedSkipped: number;
+    /** Estimated tokens those dropped injection nodes would have consumed. */
+    injectedSkippedTokens: number;
+    /** How many nodes were dropped per canonical injection key. */
+    injectedByKey: Record<string, number>;
 }
 
 /** The VCC brief-mode noise XML patterns, as regex sources. */
@@ -76,6 +82,8 @@ export declare const DEFAULT_NOISE_PATTERNS: readonly string[];
 export declare const DEFAULT_TOOL_KEY_FIELDS: Readonly<Record<string, string>>;
 /** Tools whose key argument is rendered in the one-liner (default whitelist). */
 export declare const DEFAULT_ARG_TOOLS: readonly string[];
+/** Host injection sources dropped from the compiled view by default. */
+export declare const DEFAULT_SKIP_INJECT_TYPES: readonly string[];
 /** Build marker proving which compiler revision produced a debug log. */
 export declare const COMPILER_REV: string;
 /** Join entries: single newlines between consecutive tool rows, blank lines elsewhere. */
@@ -92,6 +100,10 @@ export declare function pickToolKeyArg(name: string, input: unknown, keyFields: 
 export declare function parseToolArguments(argumentsRaw: string): unknown;
 export declare function projectToolResultText(blocks: readonly unknown[]): string;
 export declare function isCheckpointSource(source: unknown): boolean;
+/** Canonical `<kind>:<name>` identity of one message source (upstream `customType` analogue). */
+export declare function injectKeyOf(source: unknown): string;
+/** Short display label for one injection key, used by the omission marker. */
+export declare function injectKeyLabel(key: string): string;
 export declare function excerptToolResult(text: string, budget: number, ref: string): string;
 export declare function entryText(entry: string | CompileEntry): string;
 export declare function compileNodes(nodes: readonly CompileNode[], config: CompilerConfig, budgets?: CompileBudgets): { entries: CompileEntry[]; stats: CompileStats };

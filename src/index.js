@@ -17,7 +17,7 @@ import { appendFileSync } from "node:fs";
 import { CompactionEngine, ManualCompactionError } from "@deepseek-ai/dsh-compaction";
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
-import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, isCheckpointSource } from "./compiler.js";
+import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES, isCheckpointSource } from "./compiler.js";
 import { assertNoActiveCompaction, compactSurfaceRegion, selectCompactableRange } from "./region.js";
 const sessionEvents = (s) => (Array.isArray(s.events) ? s.events : s.snapshotEvents ? s.snapshotEvents() : []);
 
@@ -40,6 +40,13 @@ const DEFAULT_TEXT_TOKENS = 512;
 const DEFAULT_USER_TEXT_TOKENS = 1024;
 const DEFAULT_TOOL_CALL_TOKENS = 128;
 const DEFAULT_TOOL_RESULT_EXCERPT_TOKENS = 256;
+/**
+ * Default for dropping per-turn host injections (runtime-context/memory
+ * snapshot, skill catalog) from the compiled checkpoint view. They are
+ * regenerated on every request and kept verbatim in the append-only log, so
+ * compiling them only spends checkpoint budget on text the model already has.
+ */
+const DEFAULT_SKIP_PER_TURN_INJECTIONS = true;
 /** Backend provenance recorded on the `compaction/summary` event. */
 const COMPILER_PROVIDER = "dsh-compaction-instant";
 const COMPILER_MODEL = "vcc-compiler";
@@ -69,6 +76,8 @@ const COMPILER_CONFIG_KEYS = [
   "toolKeyFields",
   "toolArgTools",
   "hideTools",
+  "skipPerTurnInjections",
+  "skipInjectTypes",
   "debug",
   "debugLogPath"
 ];
@@ -114,7 +123,8 @@ function pickSettingsFields(config) {
     ...config.auto !== undefined ? { auto: config.auto } : {},
     ...config.thresholdRatio !== undefined ? { thresholdRatio: config.thresholdRatio } : {},
     ...config.retainTurns !== undefined ? { retainTurns: config.retainTurns } : {},
-    ...config.retainTokens !== undefined ? { retainTokens: config.retainTokens } : {}
+    ...config.retainTokens !== undefined ? { retainTokens: config.retainTokens } : {},
+    ...config.skipPerTurnInjections !== undefined ? { skipPerTurnInjections: config.skipPerTurnInjections } : {}
   };
 }
 
@@ -154,6 +164,8 @@ export function resolveConfig(config = {}) {
     toolKeyFields: resolveToolKeyFields(config.toolKeyFields),
     toolArgTools: resolveToolNameList(config.toolArgTools, DEFAULT_ARG_TOOLS, "toolArgTools"),
     hideTools: resolveToolNameList(config.hideTools, [], "hideTools"),
+    skipPerTurnInjections: config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS,
+    skipInjectTypes: resolveSkipInjectTypes(config.skipInjectTypes, config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS),
     debug,
     debugLogPath,
     ...debug ? {
@@ -263,11 +275,12 @@ function validatePolicy(config, name) {
   if (config.noisePatterns !== undefined) {
     if (!Array.isArray(config.noisePatterns) || config.noisePatterns.some((pattern) => typeof pattern !== "string")) throw new Error(`${name}.noisePatterns must be an array of strings`);
   }
-  for (const key of ["toolArgTools", "hideTools"]) {
+  for (const key of ["toolArgTools", "hideTools", "skipInjectTypes"]) {
     if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some((entry) => typeof entry !== "string" || entry.length === 0))) {
       throw new Error(`${name}.${key} must be an array of non-empty strings`);
     }
   }
+  if (config.skipPerTurnInjections !== undefined && typeof config.skipPerTurnInjections !== "boolean") throw new Error(`${name}.skipPerTurnInjections must be a boolean`);
   if (config.debug !== undefined && typeof config.debug !== "boolean") throw new Error(`${name}.debug must be a boolean`);
   if (config.debugLogPath !== undefined && typeof config.debugLogPath !== "string") throw new Error(`${name}.debugLogPath must be a string`);
 }
@@ -281,6 +294,29 @@ function resolveToolNameList(configured, fallback, key) {
   if (configured === undefined || configured.length === 0) return [...fallback];
   if (!Array.isArray(configured) || configured.some((entry) => typeof entry !== "string" || entry.length === 0)) {
     throw new Error(`InstantCompactionConfig: ${key} must be an array of non-empty strings`);
+  }
+  return [...new Set(configured)];
+}
+
+/**
+ * Resolve the injection-source skip list for the compiled view.
+ *
+ * Upstream parity note: pi-vcc's `skipCustomTypes` filters only the summarizer
+ * input. Here the same restriction holds — the list reaches the compiler only,
+ * so region selection, token pricing, and the retained tail are untouched.
+ *
+ * The empty list means "unset" for the same reason as `hideTools` (the config
+ * pipeline injects `[]` for absent array keys), so the defaults apply unless
+ * the feature is switched off with `skipPerTurnInjections: false`.
+ * @param configured - user-supplied key list, if any.
+ * @param enabled - resolved `skipPerTurnInjections` switch.
+ * @returns the effective (possibly empty) skip list.
+ */
+function resolveSkipInjectTypes(configured, enabled) {
+  if (enabled !== true) return [];
+  if (configured === undefined || configured.length === 0) return [...DEFAULT_SKIP_INJECT_TYPES];
+  if (!Array.isArray(configured) || configured.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+    throw new Error("InstantCompactionConfig: skipInjectTypes must be an array of non-empty strings");
   }
   return [...new Set(configured)];
 }
@@ -442,6 +478,8 @@ export class InstantCompactionEngine extends CompactionEngine {
     toolKeyFields: z.dict(z.string()),
     toolArgTools: z.array(z.string()),
     hideTools: z.array(z.string()),
+    skipPerTurnInjections: volatileField(z.boolean()),
+    skipInjectTypes: z.array(z.string()),
     debug: z.boolean(),
     debugLogPath: z.string()
   });
@@ -458,7 +496,8 @@ export class InstantCompactionEngine extends CompactionEngine {
     auto: z.boolean().default(true),
     thresholdRatio: z.number().min(0).max(1).default(DEFAULT_THRESHOLD_RATIO),
     retainTurns: z.number().step(1).min(1).default(DEFAULT_RETAIN_TURNS),
-    retainTokens: z.number().step(1).min(0).default(DEFAULT_RETAIN_TOKENS)
+    retainTokens: z.number().step(1).min(0).default(DEFAULT_RETAIN_TOKENS),
+    skipPerTurnInjections: z.boolean().default(DEFAULT_SKIP_PER_TURN_INJECTIONS)
   });
   /** Resolved and validated compaction configuration. */
   config;
@@ -470,7 +509,7 @@ export class InstantCompactionEngine extends CompactionEngine {
     this.entry = config;
     this.source = () => config;
     this.config = resolveConfig(config);
-    engineDebug(this.config, `constructed rev=${COMPILER_REV} debugLog=${this.config.debugLogPath} argTools=[${this.config.toolArgTools.join(",")}] hideTools=[${this.config.hideTools.join(",")}]`);
+    engineDebug(this.config, `constructed rev=${COMPILER_REV} debugLog=${this.config.debugLogPath} argTools=[${this.config.toolArgTools.join(",")}] hideTools=[${this.config.hideTools.join(",")}] skipInject=[${this.config.skipInjectTypes.join(",")}]`);
     this._autoDisposer = null;
     this._autoActive = false;
     this._installSettingsSection(ctx);
@@ -661,7 +700,7 @@ export class InstantCompactionEngine extends CompactionEngine {
       maxTokens: this.effectiveMaxTokens(prepared.shadowedTokenCount),
       checkpointOrdinals
     });
-    engineDebug(this.config, `compile done entries=${entries.length} tokens=${stats.tokens} capped=${capped} toolCalls=${stats.toolCalls} toolResults=${stats.toolResults}`);
+    engineDebug(this.config, `compile done entries=${entries.length} tokens=${stats.tokens} capped=${capped} toolCalls=${stats.toolCalls} toolResults=${stats.toolResults} skippedInject=${stats.injectedSkipped} skippedInjectTokens=${stats.injectedSkippedTokens}`);
     return {
       entries,
       stats,

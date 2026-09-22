@@ -71,13 +71,17 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | `toolKeyFields` | 内置 | 额外的"工具名 → 参数里的关键字段"映射，用于单行展示 |
 | `toolArgTools` | 见 compiler | 白名单：这些工具的关键参数会显示在单行里（`read`/`write`/`edit`/`glob`/`grep`/`bash`/`shell`/`web_search`/`skill`/`subagent`/…）；其余工具只显示名字 |
 | `hideTools` | — | 完全从检查点里去掉的内部管理工具 |
+| `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）与技能目录（`skill-catalog:catalog`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
+| `skipInjectTypes` | 见 compiler | 自定义要跳过的注入来源，键是 `<kind>:<name>`（`{kind:'plugin',plugin:'x'}` → `plugin:x`；`{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`）。**空数组 = 没设置**（回退默认表）；要"什么都不跳"请用 `skipPerTurnInjections: false` |
 | `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`retainTurns`/`retainTokens` |
 | `compactionRetries` / `maxOverflowRetries` | `1` / `1` | 重试次数，含义和官方引擎一样 |
 | `summarizationProvider` / `summarizationModel` | — | 仅为兼容官方配置而接受；**不起作用**——本引擎从不调用模型 |
 
 recall 工具和命令插件各自接受 `{ maxRecallTokens?: 16000, maxSearchHits?: 50, searchBudgetMs?: 3000 }` 配置。排序路径的相对长尾阈值（`0.2`）是调好的常量、不是配置项：生产调用点永远用默认值，只有基准脚本和定向测试才以编程方式覆盖（与上游的 `SearchTuning` 一致）。
 
-> **Cordis 配置坑：** 插件行的配置要经过 schemastery schema 校验，它的 `~standard` 适配器会给**每个没写的数组项注入 `[]`**（`toolArgTools`、`hideTools`、`noisePatterns`、`toolKeyFields`、`modelPolicies`）。本引擎把空数组当作"没设置"，会回退到默认值——所以不写 `toolArgTools` 就自动用内置白名单（千万别用 `toolArgTools: []` 想关掉它；空 = 默认）。`debug: true` 会把每次压缩的诊断写进 `debugLogPath` 指定的文件（默认 `$DSH_HOME/compaction-debug.log`）。
+> **Cordis 配置坑：** 插件行的配置要经过 schemastery schema 校验，它的 `~standard` 适配器会给**每个没写的数组项注入 `[]`**（`toolArgTools`、`hideTools`、`skipInjectTypes`、`noisePatterns`、`toolKeyFields`、`modelPolicies`）。本引擎把空数组当作"没设置"，会回退到默认值——所以不写 `toolArgTools` 就自动用内置白名单（千万别用 `toolArgTools: []` 想关掉它；空 = 默认）。`debug: true` 会把每次压缩的诊断写进 `debugLogPath` 指定的文件（默认 `$DSH_HOME/compaction-debug.log`）。
+>
+> **为什么默认跳过每轮注入（实测）**：在三个真实会话上把同一条压缩区间分别按开/关编译，**73%–98% 的编译预算花在了每轮注入的样板文本上**（单区间示例：27 节点区间 8240 → 1042 token，省 87.4%；13 节点区间省 95.5%）。整场会话口径：运行上下文快照约 71 KB/轮、技能目录约 16.6 KB/轮，一个 15.5 MB 的会话里这两类合计 6.8 MB，74/74 个检查点里都带着它们。关掉该开关即恢复旧行为。
 
 预算有两道保险：按 token 数限制，再按"预算 × 4"的字符数限制——所以再长的连续字符串（base64 大块、压缩过的文件）也绕不过去。工具调用**永远是单行**：不会缩放，预算不够时只压缩对话文本（每条最少留 **32 token**）。如果压缩结果还是超过预算，先删最旧的**工具行**（`[N tool/result entries elided: seqs a-b]`），再删其余最旧的条目（`[N earlier entries elided: seqs a-b]`）——工具调用永远挤不掉对话。最新的内容总能保住。
 

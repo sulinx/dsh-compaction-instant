@@ -387,9 +387,82 @@ export function projectToolResultText(blocks) {
   return parts.join("\n");
 }
 
-/** Whether a message source identifies a landed compaction checkpoint node. */
+/**
+ * Whether a message source identifies a landed compaction checkpoint node.
+ *
+ * Two host generations spell this differently: dsh ≤ 0.1.6 marks the landed
+ * checkpoint `{kind:"plugin", plugin:"compact"}`, while 0.1.7 emits a dedicated
+ * `{kind:"compact-checkpoint", compactionId}` source. Both must be recognized —
+ * a checkpoint is the condensed history itself, so misreading one as an
+ * ordinary user turn both truncates it to the user-text budget and demotes it
+ * in the cap-elision order.
+ * @param source - `message.source` from `Session.deriveEventMessage`.
+ * @returns true when the node is a landed checkpoint.
+ */
 export function isCheckpointSource(source) {
-  return source !== undefined && source.kind === "plugin" && source.plugin === "compact";
+  if (source === undefined || source === null || typeof source !== "object") return false;
+  if (source.kind === "compact-checkpoint") return true;
+  return source.kind === "plugin" && source.plugin === "compact";
+}
+
+/**
+ * Canonical identity of one message source, as `<kind>:<name>` — the DSH
+ * equivalent of upstream pi-vcc's `customType` key. The name is the plugin id,
+ * the source form, or the declared source name, so every host injection class
+ * gets a stable, extension-controlled identity:
+ *
+ *   `plugin:@deepseek-ai/dsh-system-prompt` (runtime-context/memory snapshot)
+ *   `plugin:compact`                          (a landed checkpoint)
+ *   `skill-catalog:catalog`                   (the skill catalog reminder)
+ *   `user:-`                                  (a real user turn)
+ *
+ * @param source - `message.source` from `Session.deriveEventMessage`.
+ * @returns the canonical `<kind>:<name>` key.
+ */
+export function injectKeyOf(source) {
+  if (source === null || source === undefined || typeof source !== "object") return "unknown:-";
+  const kind = typeof source.kind === "string" && source.kind.length > 0 ? source.kind : "unknown";
+  const name = source.plugin ?? source.form ?? source.name ?? "-";
+  return `${kind}:${typeof name === "string" && name.length > 0 ? name : "-"}`;
+}
+
+/**
+ * Sources skipped from the compiled view by default: per-turn boilerplate the
+ * host re-injects on every request, so summarizing it spends the checkpoint
+ * budget on text that is regenerated anyway and crowds out the conversation.
+ *
+ * Measured on this machine (a 15.5 MB session, 77 turns): the runtime-context
+ * snapshot is ~71 KB and the skill catalog ~16.6 KB *per turn* — 6.8 MB of the
+ * session's user-message bytes, and 74/74 of its checkpoints carried it. Both
+ * are re-sent verbatim with every request, and the append-only durable log
+ * keeps every copy, so dropping them from the compiled view loses nothing that
+ * `recall` / `search` cannot restore.
+ *
+ * Each entry is a canonical key from {@link injectKeyOf}. The host renamed the
+ * runtime-context source in dsh 0.1.7 (`plugin:@deepseek-ai/dsh-system-prompt`
+ * → `runtime-context:snapshot`), so both spellings are listed; sessions written
+ * by either generation compile the same way.
+ *
+ * Checkpoints are deliberately NOT in this list: they are the condensed history
+ * itself.
+ */
+export const DEFAULT_SKIP_INJECT_TYPES = Object.freeze([
+  "runtime-context:snapshot",
+  "plugin:@deepseek-ai/dsh-system-prompt",
+  "skill-catalog:catalog"
+]);
+
+/**
+ * Short display label for one injection key, for the omission marker line:
+ * the `plugin:` prefix and any npm scope are dropped, so
+ * `plugin:@deepseek-ai/dsh-system-prompt` renders as `dsh-system-prompt`.
+ * @param key - canonical key from {@link injectKeyOf}.
+ * @returns the compact label.
+ */
+export function injectKeyLabel(key) {
+  const body = key.startsWith("plugin:") ? key.slice("plugin:".length) : key;
+  const unscoped = body.includes("/") ? body.slice(body.lastIndexOf("/") + 1) : body;
+  return unscoped.length > 0 ? unscoped : key;
 }
 
 /**
@@ -482,7 +555,12 @@ export function compileNodes(nodes, config, budgets) {
   // every tool call name-only.
   const argTools = config.toolArgTools?.length > 0 ? config.toolArgTools : DEFAULT_ARG_TOOLS;
   const hiddenTools = new Set(config.hideTools ?? []);
-  debugLog(config, "compile", `rev=${COMPILER_REV} nodes=${nodes.length} argTools=[${argTools.join(",")}] hideTools=[${[...hiddenTools].join(",")}] budgets=${JSON.stringify(effective)}`);
+  // Per-turn injection sources excluded from the compiled view (upstream
+  // `skipCustomTypes`). Only this view is filtered: region selection, token
+  // pricing, and the retained tail are decided before the compiler runs and are
+  // deliberately unaffected.
+  const skipInject = new Set(config.skipInjectTypes ?? []);
+  debugLog(config, "compile", `rev=${COMPILER_REV} nodes=${nodes.length} argTools=[${argTools.join(",")}] hideTools=[${[...hiddenTools].join(",")}] skipInject=[${[...skipInject].join(",")}] budgets=${JSON.stringify(effective)}`);
   const entries = [];
   const stats = {
     nodes: nodes.length,
@@ -496,7 +574,10 @@ export function compileNodes(nodes, config, budgets) {
     checkpoints: 0,
     tokens: 0,
     elidedToolRows: 0,
-    elidedRows: 0
+    elidedRows: 0,
+    injectedSkipped: 0,
+    injectedSkippedTokens: 0,
+    injectedByKey: {}
   };
   // Pre-pass over the ordered nodes: map each tool-call id to the seq of its
   // result node, so every call one-liner can carry a VCC-style result pointer
@@ -512,6 +593,7 @@ export function compileNodes(nodes, config, budgets) {
   }
   let lastRole;
   let open = false;
+  let firstInjectedSeq;
 
   /**
    * Append one compiled entry carrying a deletion-priority kind. Kinds order
@@ -622,6 +704,21 @@ export function compileNodes(nodes, config, budgets) {
         stats.toolResults += 1;
         continue;
       }
+      if (skipInject.size > 0 && !isCheckpointSource(message.source)) {
+        const key = injectKeyOf(message.source);
+        if (skipInject.has(key)) {
+          // Size the row exactly as it would have been compiled, so the saved
+          // total is the real budget this node stops consuming.
+          const raw = projectToolResultText(message.content);
+          const cost = raw.length === 0 ? 0 : estimateEntryTokens(truncateTokens(raw, effective.userTextTokens, seqRef(node.seq)).text);
+          stats.injectedSkipped += 1;
+          stats.injectedSkippedTokens += cost;
+          stats.injectedByKey[key] = (stats.injectedByKey[key] ?? 0) + 1;
+          if (firstInjectedSeq === undefined) firstInjectedSeq = node.seq;
+          debugLog(config, "skip", `seq=${node.seq} key=${key} chars=${raw.length} tokens=${cost}`);
+          continue;
+        }
+      }
       if (isCheckpointSource(message.source)) {
         stats.checkpoints += 1;
         const text = projectToolResultText(message.content);
@@ -669,6 +766,19 @@ export function compileNodes(nodes, config, budgets) {
         pushEntry(node.seq, `${roleHeader("user", node.seq)}* [user message elided: noise-only] (${seqRef(node.seq)})`, "note");
       }
     }
+  }
+  // One consolidated omission marker: the dropped nodes are per-turn
+  // boilerplate, so a per-run marker would only add back the noise the filter
+  // removes. It is a `note` row, so the cap-elision pass drops it first when a
+  // checkpoint is under budget pressure.
+  if (stats.injectedSkipped > 0) {
+    const breakdown = Object.entries(stats.injectedByKey)
+      .map(([key, count]) => `${injectKeyLabel(key)}=${count}`)
+      .join(", ");
+    const marker = `[${stats.injectedSkipped} per-turn injection event(s) omitted: ${breakdown} (~${stats.injectedSkippedTokens} tokens)]`;
+    entries.unshift({ seq: firstInjectedSeq, text: marker, kind: "note" });
+    stats.entries += 1;
+    stats.tokens += estimateEntryTokens(marker);
   }
   return { entries, stats };
 }

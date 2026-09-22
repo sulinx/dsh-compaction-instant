@@ -81,6 +81,23 @@ export interface InstantCompactionConfig {
     toolArgTools?: string[];
     /** Bookkeeping tools to drop from the checkpoint entirely (VCC `_BRIEF_HIDE_TOOLS`). Default none. */
     hideTools?: string[];
+    /**
+     * Keep host per-turn injections out of the compiled checkpoint view — the
+     * runtime-context/memory snapshot (`runtime-context:snapshot` on 0.1.7,
+     * `plugin:@deepseek-ai/dsh-system-prompt` on ≤0.1.6) and the skill catalog
+     * (`skill-catalog:catalog`). They are re-sent verbatim with every request
+     * and stay recoverable through `recall` / `search`, so compiling them only
+     * spends checkpoint budget. Region selection, token pricing and the
+     * retained tail are unaffected. Default true.
+     */
+    skipPerTurnInjections?: boolean;
+    /**
+     * Explicit list of canonical injection keys (`<kind>:<name>`, see
+     * `injectKeyOf`) to drop instead of the defaults. An empty list means
+     * "unset" and falls back to the defaults; use `skipPerTurnInjections:false`
+     * to skip nothing.
+     */
+    skipInjectTypes?: string[];
     /** Enable per-compile diagnostics to the debug log and stderr. Default false. */
     debug?: boolean;
     /** Debug log file path. Defaults to `$DSH_HOME/compaction-debug.log`. */
@@ -111,6 +128,10 @@ export interface ResolvedInstantCompactionConfig {
     readonly toolKeyFields: Readonly<Record<string, string>>;
     readonly toolArgTools: readonly string[];
     readonly hideTools: readonly string[];
+    /** Whether per-turn injections are dropped from the compiled view. */
+    readonly skipPerTurnInjections: boolean;
+    /** Effective canonical injection keys dropped from the compiled view (empty when disabled). */
+    readonly skipInjectTypes: readonly string[];
     readonly debug: boolean;
     readonly debugLogPath: string;
     /** File-appending line sink installed when `debug` is enabled. */
