@@ -347,7 +347,12 @@ test("/recall files appends the page and records the seqs behind it", async () =
   assert.equal(session.appended[0].type, "user/message");
   assert.match(session.appended[0].message.content[0].text, /\.\/src\/a\.js|a\.js/);
   assert.deepEqual(session.appended[0].options.sourceEventSeqs, [0, 0, 0, 1, 0]);
-  assert.equal(session.appended[0].message.source.plugin, "recall");
+  // 0.1.7 (v4 producers) attributes a plugin message as `plugin:<name>`; the
+  // released v3 shape was `{ kind: "plugin", plugin: <name> }`. Either way the
+  // appended page must be attributed to this plugin, which is exactly what the
+  // self-source filter keys on.
+  const source = session.appended[0].message.source;
+  assert.equal(source.kind === "plugin" ? source.plugin : source.kind.slice("plugin:".length), "recall");
 });
 
 test("/recall files reports an empty session instead of appending", async () => {
