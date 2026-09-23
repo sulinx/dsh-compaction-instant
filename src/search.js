@@ -428,7 +428,9 @@ function isSelfSearchEvent(event, selfCalls) {
     return callId !== undefined && selfCalls.has(callId);
   }
   const source = data?.source;
-  return source !== undefined && source.kind === "plugin" && SELF_PLUGIN_NAMES.includes(source.plugin);
+  if (source === undefined) return false;
+    if (typeof source.kind === "string" && source.kind.startsWith("plugin:")) return SELF_PLUGIN_NAMES.includes(source.kind.slice("plugin:".length));
+    return source.kind === "plugin" && SELF_PLUGIN_NAMES.includes(source.plugin);
 }
 
 /**

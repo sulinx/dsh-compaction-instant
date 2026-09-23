@@ -123,6 +123,43 @@ export class TargetPressureConfigError extends Error {
 }
 
 /**
+ * Symbol published by cosmokit for a **live** configuration reference.
+ * `Symbol.for` resolves through the global registry, so the check also holds
+ * for the ESM/CJS copies of the library that coexist in one process.
+ */
+const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
+
+/**
+ * Whether a parsed Config value is a live reference rather than a plain value.
+ * dsh 0.1.7 exposes every `volatile()` Config field as such a reference
+ * (`@deepseek-ai/dsh-settings` + `cordis-plugin-loader`), so the engine must
+ * read `.get()` instead of validating the reference object itself.
+ */
+function isVolatileRef(value) {
+  return typeof value === "object" && value !== null && VOLATILE_WRITE in value;
+}
+
+/**
+ * Replace volatile references with their current snapshot. Only this engine's
+ * own `Config` fields are ever handed out as references, and every one of them
+ * is a top-level scalar, so a shallow pass is exact.
+ * @param config - raw plugin configuration as delivered by the loader.
+ * @returns an equal configuration whose volatile fields hold plain values.
+ */
+function unwrapVolatileRefs(config) {
+  if (config === null || typeof config !== "object") return {};
+  let changed = false;
+  const plain = { ...config };
+  for (const [key, value] of Object.entries(plain)) {
+    if (isVolatileRef(value)) {
+      plain[key] = value.get();
+      changed = true;
+    }
+  }
+  return changed ? plain : config;
+}
+
+/**
  * Pick the settings-exposed subset out of a composition entry config, so the
  * namespace's `base` layer carries exactly the fields its schema declares.
  */
@@ -143,7 +180,8 @@ function pickSettingsFields(config) {
  * @param config - untrusted plugin configuration after Loader normalization.
  * @returns detached immutable defaults and validated exact-target overrides.
  */
-export function resolveConfig(config = {}) {
+export function resolveConfig(rawConfig = {}) {
+  const config = unwrapVolatileRefs(rawConfig);
   validateKeys(config, INSTANT_COMPACT_CONFIG_KEYS, "InstantCompactionConfig");
   validatePolicy(config, "InstantCompactionConfig");
   if (config.auto !== undefined && typeof config.auto !== "boolean") throw new Error("InstantCompactionConfig: auto must be a boolean");
@@ -556,7 +594,7 @@ export class InstantCompactionEngine extends CompactionEngine {
    */
   _installSettingsSection(ctx) {
     const entry = this.entry;
-    const base = pickSettingsFields(entry);
+    const base = pickSettingsFields(unwrapVolatileRefs(entry));
     // dsh 0.1.2 removed installSettingsSection/settingsNamespace. Register
     // through ctx.settings when the service exists; otherwise keep the
     // composition entry as the config source.
