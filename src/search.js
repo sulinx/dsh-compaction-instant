@@ -222,8 +222,8 @@ function wordCount(text) {
 }
 
 /** Case-insensitive occurrence count for one compiled term, without an array of matches. */
-function termFrequency(text, source) {
-  const pattern = new RegExp(source, "gi");
+function termFrequency(text, pattern) {
+  pattern.lastIndex = 0;
   let count = 0;
   let match;
   while ((match = pattern.exec(text)) !== null) {
@@ -546,6 +546,12 @@ function scanTerms(context, source, config) {
   const { events, checkBudget } = context;
   const terms = filterStopwords(source.split(/\s+/));
   const termSources = terms.map((term) => safeRegexSource(term));
+  // Compile each term ONCE for the whole search. Building the pattern inside the
+  // per-event loop costs one RegExp compilation per term per event: a long query
+  // over a 17k-message session measured tens of thousands of compilations and hit
+  // the 3 s search budget under load (upstream pi-vcc fixed the same loop). The
+  // counts are identical — the pattern is stateless once `lastIndex` is reset.
+  const termPatterns = termSources.map((termSource) => new RegExp(termSource, "gi"));
   const candidates = [];
   const documentFrequency = terms.map(() => 0);
   let documents = 0;
@@ -563,8 +569,8 @@ function scanTerms(context, source, config) {
     totalLength += docLength;
     const frequencies = [];
     let matchedTerms = 0;
-    for (let index = 0; index < termSources.length; index += 1) {
-      const frequency = termFrequency(text, termSources[index]);
+    for (let index = 0; index < termPatterns.length; index += 1) {
+      const frequency = termFrequency(text, termPatterns[index]);
       frequencies.push(frequency);
       if (frequency > 0) {
         matchedTerms += 1;
