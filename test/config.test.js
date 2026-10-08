@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync, rmSync } from "node:fs";
-import { compileNoisePatterns, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS } from "../src/compiler.js";
+import { compileNoisePatterns, DEFAULT_ARG_TOOLS, DEFAULT_HIDE_TOOLS, DEFAULT_NOISE_PATTERNS } from "../src/compiler.js";
 import { resolveCompactSpec, resolveConfig, resolveTargetPolicy, TargetPressureConfigError } from "../src/index.js";
 
 test("resolveConfig applies the documented defaults", () => {
@@ -56,7 +56,7 @@ test("resolveConfig validates compiler budgets and flags", () => {
 test("resolveConfig validates tool whitelists and hides, and deduplicates", () => {
   assert.ok(resolveConfig({}).toolArgTools.includes("read"));
   assert.ok(resolveConfig({}).toolArgTools.includes("bash"));
-  assert.deepEqual(resolveConfig({}).hideTools, []);
+  assert.deepEqual(resolveConfig({}).hideTools, [...DEFAULT_HIDE_TOOLS]);
   assert.throws(() => resolveConfig({ toolArgTools: "read" }), /toolArgTools/);
   assert.throws(() => resolveConfig({ toolArgTools: [""] }), /toolArgTools/);
   assert.throws(() => resolveConfig({ hideTools: ["job_kill", 5] }), /hideTools/);
@@ -72,7 +72,7 @@ test("resolveConfig treats schemastery-injected empty arrays as unset", () => {
   const injected = { toolArgTools: [], hideTools: [], noisePatterns: [], toolKeyFields: {}, debug: true };
   const config = resolveConfig(injected);
   assert.deepEqual(config.toolArgTools, [...DEFAULT_ARG_TOOLS]);
-  assert.deepEqual(config.hideTools, []);
+  assert.deepEqual(config.hideTools, [...DEFAULT_HIDE_TOOLS]);
   assert.deepEqual(config.noisePatterns, compileNoisePatterns(DEFAULT_NOISE_PATTERNS));
 });
 

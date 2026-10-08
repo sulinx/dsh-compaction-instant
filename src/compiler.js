@@ -372,6 +372,97 @@ export const DEFAULT_ARG_TOOLS = Object.freeze([
 ]);
 
 /**
+ * Bookkeeping tools dropped from the compiled view by default. `todo_write`
+ * only ever records the plan's newest state, so every earlier write is
+ * superseded noise: the current list is in the harness UI and in the durable
+ * log, one `recall` away. An explicit `hideTools` list replaces this default
+ * (the cordis `[]` rule makes an empty list mean "unset").
+ */
+export const DEFAULT_HIDE_TOOLS = Object.freeze(["todo_write"]);
+
+/** Compact one token count for a one-liner: `950`, `2.3k`, `12.5k`. */
+function formatTokens(count) {
+  if (count < 1000) return String(count);
+  return `${(count / 1000).toFixed(1)}k`;
+}
+
+/**
+ * Message sources whose content is another agent speaking rather than the
+ * human. The harness stamps both (`MessageSourceMap` in `dsh-session`):
+ * `subagent-settled` is a background child's settlement notice and
+ * `agent-message` is a relayed message from another agent.
+ */
+const SUBAGENT_SOURCE_FORMS = Object.freeze({
+  "subagent-settled": "settled",
+  "agent-message": "relayed"
+});
+
+/**
+ * Legacy delivery shape (hosts/sessions whose settlement notice carries no
+ * source stamp): `Background subagent <id> reported:` or
+ * `Background subagent <id> finished and will do no further work…Its closing
+ * message:`.
+ */
+const SUBAGENT_REPORT_RE = /^Background subagent ([0-9a-fA-F][0-9a-fA-F-]{7,})\s+(reported:|finished and will do no further work[\s\S]*?Its closing message:)\s*/;
+
+/**
+ * Recognise a message that is another agent's report, not the user speaking.
+ *
+ * A background subagent's result is delivered to the orchestrator as an
+ * ordinary USER-role message. Compiled as plain user text it is
+ * indistinguishable from what the human typed and from the orchestrator's own
+ * narration, so a compacted transcript reads as if the agent itself had
+ * CONCLUDED everything a worker merely CLAIMED — and because the checkpoint is
+ * re-read by the model, that promotes an unverified report to established
+ * fact.
+ *
+ * The source stamp is authoritative; the text shape is the fallback for
+ * sessions written before the host stamped them. Failure direction is
+ * deliberate: anything unrecognised stays user text, because mislabelling the
+ * human as a subagent is worse than missing a report.
+ * @param source - the durable message source.
+ * @param text - the projected message text.
+ * @returns `{ agentId, kind, body }`, or null when this is not a report.
+ */
+export function subagentReportOf(source, text) {
+  const body = typeof text === "string" ? text : "";
+  if (body.trim().length === 0) return null;
+  if (source !== null && typeof source === "object") {
+    const form = SUBAGENT_SOURCE_FORMS[source.kind];
+    if (form !== undefined) {
+      const agentId = typeof source.senderSessionId === "string" && source.senderSessionId.length > 0 ? source.senderSessionId : "unknown";
+      return { agentId, kind: form, body };
+    }
+  }
+  const match = SUBAGENT_REPORT_RE.exec(body);
+  if (match === null) return null;
+  const rest = body.slice(match[0].length);
+  if (rest.trim().length === 0) return null;
+  return { agentId: match[1], kind: match[2].startsWith("reported") ? "reported" : "finished", body: rest };
+}
+
+/**
+ * Wrap a report body in a fence its own content cannot break.
+ *
+ * A fence, not a blockquote or `<details>`: reports routinely contain fenced
+ * code and tables, and a fixed three-backtick wrapper would terminate at the
+ * report's own fence and spill the rest into the document as compiler text.
+ * The fence is one backtick longer than the longest run inside (never shorter
+ * than three), and the info string names the author so attribution is
+ * machine-readable rather than a visual cue. Truncation happens BEFORE this
+ * call, so a clipped report always gets its closing fence.
+ * @param report - a {@link subagentReportOf} result.
+ * @param body - the (possibly truncated) report body.
+ * @returns the fenced block.
+ */
+export function fenceSubagentReport(report, body) {
+  const runs = body.match(/`+/gu);
+  const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}subagent ${report.agentId} ${report.kind}\n${body}\n${fence}`;
+}
+
+/**
  * First-line projection for a tool-call one-liner: multiline arguments
  * collapse to the first physical line plus a `[+ N lines]` marker, so
  * scripted commands (bash heredocs, multi-line pipelines) stay one compact
@@ -712,18 +803,30 @@ export function compileNodes(nodes, config, budgets) {
     injectedByKey: {},
     foreignCheckpoints: 0,
     unframedCheckpoints: 0,
+    /** Tool calls whose result was an error: dropped whole (see the call row). */
+    erroredToolCalls: 0,
+    /** Priced tokens of every tool result the checkpoint did not carry. */
+    toolResultTokens: 0,
+    /** Other-agent reports attributed with a `[subagent]` header instead of user text. */
+    subagentReports: 0,
     collapsedRows: 0
   };
-  // Pre-pass over the ordered nodes: map each tool-call id to the seq of its
-  // result node, so every call one-liner can carry a VCC-style result pointer
-  // (`(seq N -> result M)`) even though results no longer occupy entries.
-  const resultSeqByCallId = new Map();
+  // Pre-pass over the ordered nodes: map each tool-call id to its result node,
+  // so every call one-liner can carry a VCC-style result pointer (`(seq N ->
+  // result M)`) even though results never occupy entries — plus what that
+  // dropped result costs and whether it errored.
+  const resultInfoByCallId = new Map();
   for (const node of nodes) {
     const message = node.message;
     if (message === null || message === undefined || message.role !== "user" || message.content === undefined) continue;
     const first = message.content[0];
     if (first !== undefined && first.type === "tool-result" && typeof first.toolCallId === "string") {
-      resultSeqByCallId.set(first.toolCallId, node.seq);
+      const raw = projectToolResultText(first.content ?? []);
+      resultInfoByCallId.set(first.toolCallId, {
+        seq: node.seq,
+        isError: first.isError === true,
+        tokens: raw.length === 0 ? 0 : estimateEntryTokens(raw)
+      });
     }
   }
   let lastRole;
@@ -821,13 +924,28 @@ export function compileNodes(nodes, config, budgets) {
             oneLine = `* ${name}`;
             diag = `whitelist=no argsType=${typeof block.arguments} argsLen=${block.arguments === null || block.arguments === undefined ? 0 : String(block.arguments).length} argsHead=${JSON.stringify(String(block.arguments).slice(0, 60))}`;
           }
-          const resultSeq = resultSeqByCallId.get(block.id);
+          const outcome = resultInfoByCallId.get(block.id);
+          if (outcome !== undefined) stats.toolResultTokens += outcome.tokens;
+          if (outcome?.isError === true) {
+            // The call errored: the work it guarded was retried or abandoned, the
+            // row carries no durable fact a checkpoint needs, and the durable
+            // event stays one recall away. Dropping it whole also stops a failed
+            // call from reading as an executed step.
+            stats.erroredToolCalls += 1;
+            debugLog(config, "tool", `seq=${node.seq} name=${name} DROPPED (result ${outcome.seq} errored, ~${outcome.tokens} tokens)`);
+            continue;
+          }
+          const resultSeq = outcome?.seq;
           const ref = resultSeq === undefined ? seqRef(node.seq) : `${seqRef(node.seq)} -> result ${resultSeq}`;
+          // Report what the dropped result costs: the agent has no other way to
+          // see the price of its own tool output, and that is the signal that
+          // teaches it which calls are dear.
+          const cost = outcome === undefined || outcome.tokens === 0 ? "" : ` [${formatTokens(outcome.tokens)} tokens dropped]`;
           const kept = truncateTokens(oneLine, effective.toolCallTokens, seqRef(node.seq));
-          debugLog(config, "tool", `seq=${node.seq} name=${name} ${diag} line=${JSON.stringify(oneLine.slice(0, 80))} truncated=${kept.truncated} ref=${ref}`);
+          debugLog(config, "tool", `seq=${node.seq} name=${name} ${diag} line=${JSON.stringify(oneLine.slice(0, 80))} truncated=${kept.truncated} ref=${ref} resultTokens=${outcome === undefined ? 0 : outcome.tokens}`);
           // The ranking scores the same argument the one-liner renders, so a
           // `pwsh "npm test"` row outranks `pwsh "cd /tmp"`.
-          pushEntry(node.seq, header + `${kept.text} (${ref})`, "tool", { toolName: name, argText: keyArg });
+          pushEntry(node.seq, header + `${kept.text} (${ref})${cost}`, "tool", { toolName: name, argText: keyArg });
           continue;
         }
         if (block.type === "image") {
@@ -895,6 +1013,18 @@ export function compileNodes(nodes, config, budgets) {
           pushEntry(node.seq, header + (foreign ? `${FOREIGN_SEQ_NOTE}\n${body}` : body), "checkpoint");
           debugLog(config, "checkpoint", `seq=${node.seq} chars=${text.length} bodyChars=${body.length} foreign=${foreign}`);
         }
+        continue;
+      }
+      // Another agent's report arrives as an ordinary user message but is NOT
+      // the user speaking. Give it its own role header and fence the body, so a
+      // compacted transcript never reads as if the orchestrator had concluded
+      // what a worker merely claimed. Anything unrecognised stays user text.
+      const report = subagentReportOf(message.source, projectToolResultText(message.content));
+      if (report !== null) {
+        stats.subagentReports += 1;
+        const keptReport = truncateTokens(report.body, effective.userTextTokens, seqRef(node.seq));
+        pushEntry(node.seq, roleHeader("subagent", node.seq) + fenceSubagentReport(report, keptReport.text), "text", { role: "subagent" });
+        debugLog(config, "subagent", `seq=${node.seq} agent=${report.agentId} kind=${report.kind} chars=${report.body.length}`);
         continue;
       }
       let surviving = 0;

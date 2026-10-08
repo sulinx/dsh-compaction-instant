@@ -17,7 +17,7 @@ import { appendFileSync } from "node:fs";
 import { CompactionEngine, ManualCompactionError } from "@deepseek-ai/dsh-compaction";
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
-import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES } from "./compiler.js";
+import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_HIDE_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES } from "./compiler.js";
 import { checkpointOrdinals, createEventIndex } from "./indices.js";
 import { assertNoActiveCompaction, CheckpointNotSmallerError, compactSurfaceRegion, selectCompactableRange } from "./region.js";
 
@@ -230,7 +230,7 @@ export function resolveConfig(rawConfig = {}) {
     noisePatterns: compileNoisePatterns(config.noisePatterns !== undefined && config.noisePatterns.length > 0 ? config.noisePatterns : DEFAULT_NOISE_PATTERNS),
     toolKeyFields: resolveToolKeyFields(config.toolKeyFields),
     toolArgTools: resolveToolNameList(config.toolArgTools, DEFAULT_ARG_TOOLS, "toolArgTools"),
-    hideTools: resolveToolNameList(config.hideTools, [], "hideTools"),
+    hideTools: resolveToolNameList(config.hideTools, DEFAULT_HIDE_TOOLS, "hideTools"),
     skipPerTurnInjections: config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS,
     skipInjectTypes: resolveSkipInjectTypes(config.skipInjectTypes, config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS),
     rankElision: config.rankElision ?? DEFAULT_RANK_ELISION,

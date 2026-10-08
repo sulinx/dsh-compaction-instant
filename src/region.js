@@ -375,6 +375,20 @@ export function prepareCompaction(dependencies, session, selection) {
 }
 
 /**
+ * What the checkpoint chose not to carry, for the checkpoint's intro line.
+ * Tool results never occupy a compiled entry: they cost the surface in full and
+ * the checkpoint nothing, so the agent has no other way to see that they were
+ * left behind (and that `recall` restores them by `-> result N`).
+ */
+function droppedResults(stats) {
+  const count = stats?.toolResults ?? 0;
+  const tokens = stats?.toolResultTokens ?? 0;
+  if (count === 0) return "";
+  const errored = stats?.erroredToolCalls ?? 0;
+  return `；未编入 ${count} 条工具结果 (~${tokens} tokens)${errored === 0 ? "" : `，其中 ${errored} 条失败调用已整条丢弃`}（可用 recall 取回）`;
+}
+
+/**
  * Run the deterministic region compiler, frame its checkpoint, and price the
  * replacement under the singleton token meter. Mirrors basic's shrink
  * guarantee: a checkpoint that would not reduce the surface is rejected.
@@ -397,7 +411,7 @@ async function compileCompaction(dependencies, prepared, agent, compactionId, so
   for (let attempt = 0; attempt < SHRINK_RETRY_SPAN_FRACTIONS.length; attempt += 1) {
     const spanFraction = SHRINK_RETRY_SPAN_FRACTIONS[attempt];
     const compiled = await dependencies.compile(prepared, agent, signal, spanFraction === undefined ? undefined : { capFraction: spanFraction });
-    const introLine = `${verb}: 将 ${prepared.shadowedSeqs.length} 个节点 / ~${prepared.shadowedTokenCount} tokens 编译为 ${compiled.entries.length} 条目 / ~${compiled.stats.tokens} tokens`;
+    const introLine = `${verb}: 将 ${prepared.shadowedSeqs.length} 个节点 / ~${prepared.shadowedTokenCount} tokens 编译为 ${compiled.entries.length} 条目 / ~${compiled.stats.tokens} tokens${droppedResults(compiled.stats)}`;
     const headerLine = `## Compiled checkpoint: ${prepared.shadowedSeqs.length} nodes (seqs ${prepared.start}-${prepared.end}, ~${prepared.shadowedTokenCount} tokens) — ${compiled.entries.length} entries, ~${compiled.stats.tokens} tokens compiled`;
     // Verbatim retention footer: nodes after the compiled span were never
     // compiled, so they stay in the live surface as original text.

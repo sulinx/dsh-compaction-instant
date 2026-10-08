@@ -65,6 +65,12 @@ export interface CompileStats {
     checkpoints: number;
     /** Absorbed checkpoints whose own framing (preamble/tags/recall guide) was stripped. */
     unframedCheckpoints: number;
+    /** Tool calls whose result errored: the call row is dropped whole. */
+    erroredToolCalls: number;
+    /** Priced tokens of every tool result the checkpoint did not carry. */
+    toolResultTokens: number;
+    /** Other-agent reports attributed with a `[subagent]` header instead of user text. */
+    subagentReports: number;
     tokens: number;
     /** Low-value rows (tool/result/media/note) dropped by the first elision pass. */
     elidedToolRows: number;
@@ -102,6 +108,16 @@ export declare function pickToolKeyArg(name: string, input: unknown, keyFields: 
 export declare function parseToolArguments(argumentsRaw: string): unknown;
 export declare function projectToolResultText(blocks: readonly unknown[]): string;
 export declare function isCheckpointSource(source: unknown): boolean;
+/**
+ * Recognise a message that is another agent's report (a background subagent's
+ * settlement notice or a relayed agent message), not the user speaking.
+ * `null` when the message is not a recognised report.
+ */
+export declare function subagentReportOf(source: unknown, text: unknown): { agentId: string; kind: 'settled' | 'relayed' | 'reported' | 'finished'; body: string } | null;
+/** Wrap a report body in a fence its own content cannot break, naming the author. */
+export declare function fenceSubagentReport(report: { agentId: string; kind: string }, body: string): string;
+/** Bookkeeping tools hidden from the compiled view by default. */
+export declare const DEFAULT_HIDE_TOOLS: readonly string[];
 /**
  * Strip this engine's own checkpoint framing (preamble, tags, recall guide)
  * from an absorbed checkpoint, returning its inner body; foreign framing is

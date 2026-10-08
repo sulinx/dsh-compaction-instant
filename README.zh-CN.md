@@ -25,7 +25,9 @@ on it
 next question
 ```
 
-每个工具调用只占**一行**：白名单里的工具（`toolArgTools`）显示关键参数，其他工具只显示名字（`* job_kill (seq 9 -> result 10)`），`hideTools` 里列的工具完全不出现。工具结果不占位置——通过 `-> result N` 指针，用一次 `recall(type:"result")` 就能取回。较长的用户/助手文本按预算截断，并在末尾标注 `...(truncated from seq N)`；每处省略都写明了完整内容存在哪个事件里。
+每个工具调用只占**一行**：白名单里的工具（`toolArgTools`）显示关键参数，其他工具只显示名字（`* job_kill (seq 9 -> result 10)`），`hideTools` 里列的工具完全不出现。**结果报错**的工具调用整条丢弃（那次工作已被重试或放弃，原始事件仍可用一次 `recall` 取回）；每条保留的调用还会报出它丢掉了多大的结果——`* bash "pnpm test" (seq 1 -> result 2) [2.3k tokens dropped]`——因为模型除此之外看不到自己工具输出的代价。工具结果不占位置——通过 `-> result N` 指针用一次 `recall(type:"result")` 就能取回——检查点首行还会写明这次没编入多少条。较长的用户/助手文本按预算截断，并在末尾标注 `...(truncated from seq N)`；每处省略都写明了完整内容存在哪个事件里。
+
+**别的 agent 的报告会被标注归属，绝不当成"用户说的"。** 后台子代理的结算通知（以及中继的 `agent-message`）是以普通 user 消息投递的；若按普通用户文本编译，压缩后的记录会读起来像"编排者自己得出了结论"，而实际只是 worker 的**声称**——检查点又会被模型重读，等于把未经验证的报告升格为既成事实。这类消息现在带 `[subagent]` 角色头，正文放进围栏并在 info string 里写明作者（`subagent <senderId> settled`）；围栏长度由内容决定（比正文里最长反引号串多一个），所以报告自带的代码围栏不会截断它。判据用宿主的 `source.kind`（`subagent-settled` / `agent-message`），文本形状（`Background subagent <id> reported:`）只作为无标记旧会话的兜底；**认不出来的一律按用户文本处理**——把真人误标成子代理比漏掉一份报告更糟。
 
 ## Recall：把丢掉的内容找回来
 
@@ -93,7 +95,7 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | `noisePatterns` | 见 compiler | 噪音标签的正则来源，按 `s` 模式匹配 |
 | `toolKeyFields` | 内置 | 额外的"工具名 → 参数里的关键字段"映射，用于单行展示 |
 | `toolArgTools` | 见 compiler | 白名单：这些工具的关键参数会显示在单行里（`read`/`write`/`edit`/`glob`/`grep`/`bash`/`shell`/`web_search`/`skill`/`subagent`/…）；其余工具只显示名字 |
-| `hideTools` | — | 完全从检查点里去掉的内部管理工具 |
+| `hideTools` | `todo_write` | 完全从检查点里去掉的内部管理工具。只有最新一份待办列表为真，更早的写入都是被取代的噪音；显式列表会替换这个默认值 |
 | `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）与技能目录（`skill-catalog:catalog`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
 | `skipInjectTypes` | 见 compiler | 自定义要跳过的注入来源，键是 `<kind>:<name>`（`{kind:'plugin',plugin:'x'}` → `plugin:x`；`{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`）。**空数组 = 没设置**（回退默认表）；要"什么都不跳"请用 `skipPerTurnInjections: false` |
 | `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`compactAtTokens`/`retainTurns`/`retainTokens` |

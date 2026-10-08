@@ -299,6 +299,31 @@ test("compileNodes absorbs a framed checkpoint without nesting its framing", () 
   assert.ok(!again.entries[0].text.includes("RECALL: append-only log"));
 });
 
+test("compileNodes drops a tool call whose result errored", () => {
+  const nodes = [
+    { seq: 1, message: { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "bash", arguments: '{"command":"pnpm test"}' }], source: { provider: "p", model: "m" } } },
+    { seq: 2, message: { role: "user", content: [{ type: "tool-result", toolCallId: "c1", isError: true, content: [{ type: "text", text: "Error: boom" }] }] } },
+    { seq: 3, message: { role: "assistant", content: [{ type: "text", text: "retrying without the flag" }], source: { provider: "p", model: "m" } } }
+  ];
+  const { entries, stats } = compileNodes(nodes, CONFIG);
+  assert.equal(stats.erroredToolCalls, 1);
+  assert.equal(stats.toolResultTokens, estimateEntryTokens("Error: boom"));
+  assert.ok(!entries.some((entry) => entry.kind === "tool"), "the failed call keeps no row");
+  assert.match(entries.map((entry) => entry.text).join("\n"), /retrying without the flag/);
+});
+
+test("a surviving call row reports the size of the result it dropped", () => {
+  const big = "payload ".repeat(1000);
+  const nodes = [
+    { seq: 1, message: { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "bash", arguments: '{"command":"cat big.log"}' }], source: { provider: "p", model: "m" } } },
+    { seq: 2, message: { role: "user", content: [{ type: "tool-result", toolCallId: "c1", content: [{ type: "text", text: big }] }] } }
+  ];
+  const { entries, stats } = compileNodes(nodes, CONFIG);
+  assert.equal(stats.erroredToolCalls, 0);
+  assert.ok(stats.toolResultTokens > 1000, "the dropped result is priced");
+  assert.match(entries[0].text, /\(seq 1 -> result 2\) \[\d+(\.\d)?k? tokens dropped\]$/);
+});
+
 test("compileNodes labels images and documents", () => {  const nodes = [
     { seq: 1, message: { role: "user", content: [{ type: "image", attachment: { id: "i1" } }], source: { kind: "user" } } },
     { seq: 2, message: { role: "assistant", content: [{ type: "document", attachment: { id: "d1" } }] } }

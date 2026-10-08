@@ -48,12 +48,18 @@ test("the shrink gate retries at a tighter span-pinned cap and lands", async () 
       // The first attempt overshoots the 1000-token span; the span-pinned
       // retries come back small enough to satisfy the shrink guarantee.
       const filler = options?.capFraction === undefined ? "x".repeat(8000) : "y".repeat(50);
-      return { entries: [{ seq: prepared.shadowedSeqs[0], text: `[user] (seq ${prepared.shadowedSeqs[0]})\n${filler}` }], stats: { tokens: filler.length }, provider: "p", model: "m" };
+      return { entries: [{ seq: prepared.shadowedSeqs[0], text: `[user] (seq ${prepared.shadowedSeqs[0]})\n${filler}` }], stats: { tokens: filler.length, toolResults: 3, toolResultTokens: 12345, erroredToolCalls: 1 }, provider: "p", model: "m" };
     }
   };
   const result = await compactSurfaceRegion(dependencies, session, 1, 2, undefined, { owner: null, stability: "selected-span" }, undefined);
   assert.deepEqual(calls, [undefined, 0.5], "first attempt, then the half-span cap");
   assert.ok(result !== undefined);
+  // The intro line names what the checkpoint chose not to carry: tool results
+  // cost the surface in full and the checkpoint nothing.
+  const summary = result.summary[0].text;
+  assert.match(summary, /未编入 3 条工具结果 \(~12345 tokens\)/);
+  assert.match(summary, /1 条失败调用已整条丢弃/);
+  assert.match(summary, /可用 recall 取回/);
 });
 
 test("a span that cannot pay for the framing is declined, not retried forever", async () => {
