@@ -11,6 +11,14 @@ export interface CompileNode {
         content: readonly unknown[];
         source?: unknown;
     } | null;
+    /**
+     * Shadowed originals of a node landed as `surfaceOp: { op: "replace" }` —
+     * the `SessionEvent.sourceEventSeqs` the host records (a pruned tool result
+     * cites what it replaced). Only replacements set it: an `append` cites its
+     * own tool call and shadows nothing. A single earlier source prints as
+     * `seq R <- original S`.
+     */
+    originalSeqs?: readonly number[];
 }
 
 /** Per-block budgets applied by one compile pass. */
@@ -129,6 +137,8 @@ export declare function injectKeyOf(source: unknown): string;
 /** Short display label for one injection key, used by the omission marker. */
 export declare function injectKeyLabel(key: string): string;
 export declare function excerptToolResult(text: string, budget: number, ref: string): string;
+/** Replacement provenance suffix for one node (`" <- original S"`), or `""`. */
+export declare function originalRef(node: { seq: number; message?: { source?: unknown } | null; originalSeqs?: readonly number[] }): string;
 export declare function entryText(entry: string | CompileEntry): string;
 export declare function compileNodes(nodes: readonly CompileNode[], config: CompilerConfig, budgets?: CompileBudgets): { entries: CompileEntry[]; stats: CompileStats };
 export declare function compileRegion(nodes: readonly CompileNode[], config: CompilerConfig): { entries: CompileEntry[]; stats: CompileStats; capped: boolean };

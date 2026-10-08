@@ -18,7 +18,7 @@ import { CompactionEngine, ManualCompactionError } from "@deepseek-ai/dsh-compac
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
 import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_HIDE_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES } from "./compiler.js";
-import { checkpointOrdinals, createEventIndex } from "./indices.js";
+import { checkpointOrdinals, createEventIndex, replacementSourcesOf } from "./indices.js";
 import { assertNoActiveCompaction, CheckpointNotSmallerError, compactSurfaceRegion, selectCompactableRange } from "./region.js";
 
 // ── configuration resolution ───────────────────────────────────────────────
@@ -769,7 +769,11 @@ export class InstantCompactionEngine extends CompactionEngine {
       if (event === undefined) throw new Error(`compaction: surface seq ${seq} has no matching session event (corrupt surface)`);
       return {
         seq,
-        message: prepared.session.deriveEventMessage(event)
+        message: prepared.session.deriveEventMessage(event),
+        // Replacement provenance: only an `op: "replace"` node leaves an earlier
+        // original behind (`tool-result-pruner` prunes that way); an `append` also
+        // cites sources — a tool result cites its own call — and shadows nothing.
+        originalSeqs: replacementSourcesOf(event)
       };
     });
     // Session-wide checkpoint ordinals (1 = oldest compaction): the compiler

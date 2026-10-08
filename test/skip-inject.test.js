@@ -36,6 +36,7 @@ const assistant = (content) => ({ role: "assistant", content: [text(content)] })
 const RUNTIME_CONTEXT = "plugin:@deepseek-ai/dsh-system-prompt";
 const RUNTIME_CONTEXT_017 = "runtime-context:snapshot";
 const SKILL_CATALOG = "skill-catalog:catalog";
+const REPEAT_REMINDER = "repeat-tool-reminder:-";
 const CHECKPOINT = "plugin:compact";
 const CHECKPOINT_017 = "compact-checkpoint:-";
 
@@ -88,7 +89,7 @@ test("injectKeyLabel shortens plugin keys but never loses the identity", () => {
 });
 
 test("the default skip list covers both host generations and not checkpoints", () => {
-  assert.deepEqual([...DEFAULT_SKIP_INJECT_TYPES], [RUNTIME_CONTEXT_017, RUNTIME_CONTEXT, SKILL_CATALOG]);
+  assert.deepEqual([...DEFAULT_SKIP_INJECT_TYPES], [RUNTIME_CONTEXT_017, RUNTIME_CONTEXT, SKILL_CATALOG, REPEAT_REMINDER]);
   assert.equal(DEFAULT_SKIP_INJECT_TYPES.includes(CHECKPOINT), false);
   assert.equal(DEFAULT_SKIP_INJECT_TYPES.includes(CHECKPOINT_017), false);
   assert.equal(isCheckpointSource({ kind: "plugin", plugin: "compact" }), true);
@@ -116,6 +117,23 @@ test("a 0.1.7-shaped runtime-context snapshot is skipped by default", () => {
   assert.equal(result.stats.injectedSkipped, 1);
   assert.deepEqual(result.stats.injectedByKey, { [RUNTIME_CONTEXT_017]: 1 });
   assert.equal(joined(result).includes("Current runtime context"), false);
+  assert.equal(joined(result).includes("carry on"), true);
+});
+
+test("a 0.2 repeat-tool reminder is skipped by default", () => {
+  // `dsh-repeat-tool-reminder` (0.2) injects an advisory reminder with its own
+  // source kind. It speaks about the live step, so a condensed span must not
+  // carry it — and it must stay skippable, never a reason to drop a real turn.
+  const body = "Repeated tool call detected:\n- tool: bash\n- consecutive_calls: 3\n- arguments: {\"command\":\"pnpm test\"}\nThe repeated calls are not making progress.";
+  const nodes = [
+    injectNode(0, REPEAT_REMINDER, body),
+    realUserNode(1, "carry on"),
+    assistantNode(2, "ok")
+  ];
+  const result = compileRegion(nodes, config());
+  assert.equal(result.stats.injectedSkipped, 1);
+  assert.deepEqual(result.stats.injectedByKey, { [REPEAT_REMINDER]: 1 });
+  assert.equal(joined(result).includes("Repeated tool call detected"), false);
   assert.equal(joined(result).includes("carry on"), true);
 });
 

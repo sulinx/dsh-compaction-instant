@@ -96,6 +96,24 @@ export function eventAtSeq(session, seq) {
 }
 
 /**
+ * The events one surface node replaced, or `undefined` when it replaced nothing.
+ *
+ * Only an `surfaceOp: { op: "replace" }` node is a shadow copy: `tool-result-pruner`
+ * lands a pruned tool result that way, and the seq the surface then names holds the
+ * prune while the cited original still holds the full text. An `op: "append"` node
+ * also carries `sourceEventSeqs` — every tool result cites its own call, and the
+ * session requires the citation — but nothing was shadowed, so it is not provenance
+ * for a pointer and must never be printed as one.
+ * @param event - session event (log-shaped or derived).
+ * @returns the shadowed seqs, or undefined.
+ */
+export function replacementSourcesOf(event) {
+  if (event?.surfaceOp?.op !== "replace") return undefined;
+  const sources = event.sourceEventSeqs;
+  return Array.isArray(sources) && sources.length > 0 ? sources : undefined;
+}
+
+/**
  * A message source that belongs to this compaction engine's own checkpoints.
  * A checkpoint is the condensed history itself, so misreading one as an
  * ordinary user turn both truncates it to the user-text budget and demotes it
@@ -164,10 +182,15 @@ export function checkpointOrdinals(session) {
  *
  *   `12` `3-7` `seq 12` `seqs 3-7` `(seq 12)` `#12` `#3-7`
  *   `result 12` `checkpoint 3`
+ *   `seq 12 -> result 34` (the printed tool-call one-liner: `head` is the call,
+ *   `kind`/`body` name the result)
+ *   `seq 12 <- original 4` (replacement provenance: the annotation is stripped
+ *   so the pointer still resolves to the surface seq it names)
  *
  * @param raw - reference text as printed or as typed by the model.
- * @returns `{ body, kind, hashed }` — `kind` is `"seq"`, `"result"`,
- *   `"checkpoint"`, or undefined when the reference carried no kind word.
+ * @returns `{ body, kind, hashed, head? }` — `kind` is `"seq"`, `"result"`,
+ *   `"checkpoint"`, or undefined when the reference carried no kind word;
+ *   `head` is the leading seq of a printed `seq C -> result R` pointer.
  */
 export function parseRefToken(raw) {
   let token = String(raw ?? "").trim();
@@ -175,15 +198,24 @@ export function parseRefToken(raw) {
   if (token.length === 0) return { body: "", kind: undefined, hashed };
   const parenthesized = /^\((.*)\)$/u.exec(token);
   if (parenthesized !== null) token = parenthesized[1].trim();
+  // Replacement provenance appended by the compiler (`seq 340 <- original 12`)
+  // belongs to the pointer, not to the selection: drop it so a verbatim paste
+  // resolves to the surface seq it names.
+  const annotated = /^(.*?)\s*<-\s*original\s+\d+\s*$/u.exec(token);
+  if (annotated !== null && annotated[1].trim().length > 0) token = annotated[1].trim();
   if (token.startsWith("#")) {
     hashed = true;
     token = token.slice(1).trim();
   }
   const prefixed = /^(seqs?|result|checkpoint)\s+(.*)$/iu.exec(token);
-  if (prefixed === null) return { body: token, kind: undefined, hashed };
+  const body = prefixed === null ? token : prefixed[2].trim();
+  // A tool-call one-liner names both ends; keep the leading seq addressable.
+  const arrow = /^(\d+)\s*->\s*result\s+(\d+)$/u.exec(body);
+  if (arrow !== null) return { body: arrow[2], kind: "result", hashed, head: arrow[1] };
+  if (prefixed === null) return { body, kind: undefined, hashed };
   const word = prefixed[1].toLowerCase();
   return {
-    body: prefixed[2].trim(),
+    body,
     kind: word === "seqs" ? "seq" : word,
     hashed
   };

@@ -64,12 +64,16 @@ export function parseSeqSpec(input) {
   for (const part of raw.split(",")) {
     const trimmed = part.trim();
     if (trimmed.length === 0) continue;
-    // Every printed pointer parses here: `(seq 12)`, `seqs 3-7`, `#12`, `12`.
-    const { body, kind } = parseRefToken(trimmed);
-    if (kind !== undefined && kind !== "seq") {
+    // Every printed pointer parses here: `(seq 12)`, `seqs 3-7`, `#12`, `12`,
+    // `(seq 12 <- original 4)`, and the tool-call one-liner
+    // `(seq 12 -> result 34)`, whose leading seq is the addressable one.
+    const parsed = parseRefToken(trimmed);
+    const { kind } = parsed;
+    if (kind !== undefined && kind !== "seq" && parsed.head === undefined) {
       errors.push(`invalid seq selection "${trimmed}"`);
       continue;
     }
+    const body = parsed.head ?? parsed.body;
     const match = /^(\d+)(?:\s*-\s*(\d+))?$/u.exec(body);
     if (match === null) {
       errors.push(`invalid seq selection "${trimmed}"`);

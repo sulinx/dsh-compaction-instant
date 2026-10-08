@@ -34,6 +34,8 @@ export declare function sessionEvents(session: IndexedSession | undefined): read
 export declare function createEventIndex(session: IndexedSession): EventIndex;
 /** Resolve one seq to its event without materializing an index. */
 export declare function eventAtSeq(session: IndexedSession, seq: number): LoggedEvent | undefined;
+/** Shadowed seqs of an `op: "replace"` node, or undefined (an append shadows nothing). */
+export declare function replacementSourcesOf(event: unknown): number[] | undefined;
 /** Whether a message source identifies a landed compaction checkpoint node. */
 export declare function isCheckpointSource(source: unknown): boolean;
 /** Whether the event is a persisted message entry. */
@@ -45,6 +47,6 @@ export declare function checkpointSeqs(session: IndexedSession): number[];
 /** seq → 1-based checkpoint ordinal, session-wide. */
 export declare function checkpointOrdinals(session: IndexedSession): Map<number, number>;
 /** Split one printed or typed reference into its optional kind word and body. */
-export declare function parseRefToken(raw: unknown): { body: string; kind: 'seq' | 'result' | 'checkpoint' | undefined; hashed: boolean };
+export declare function parseRefToken(raw: unknown): { body: string; kind: 'seq' | 'result' | 'checkpoint' | undefined; hashed: boolean; head?: string };
 /** Split one inclusive seq span into chunks no wider than `maxSpan`. */
 export declare function splitSeqSpan(start: number, end: number, maxSpan: number): { start: number; end: number }[];

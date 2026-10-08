@@ -577,7 +577,10 @@ export function injectKeyOf(source) {
  * Each entry is a canonical key from {@link injectKeyOf}. The host renamed the
  * runtime-context source in dsh 0.1.7 (`plugin:@deepseek-ai/dsh-system-prompt`
  * → `runtime-context:snapshot`), so both spellings are listed; sessions written
- * by either generation compile the same way.
+ * by either generation compile the same way. dsh 0.2 adds the repeat-tool-call
+ * guard, whose advisory reminder rides in as its own source kind — a reminder
+ * about the *live* step says nothing about a span that is already being
+ * condensed, so it is skipped like the other per-turn injections.
  *
  * Checkpoints are deliberately NOT in this list: they are the condensed history
  * itself.
@@ -585,7 +588,8 @@ export function injectKeyOf(source) {
 export const DEFAULT_SKIP_INJECT_TYPES = Object.freeze([
   "runtime-context:snapshot",
   "plugin:@deepseek-ai/dsh-system-prompt",
-  "skill-catalog:catalog"
+  "skill-catalog:catalog",
+  "repeat-tool-reminder:-"
 ]);
 
 /**
@@ -632,12 +636,53 @@ const CHECKPOINT_CLOSE_TAG = "</compacted-checkpoint>";
  * agent how to recover content the compiler elided or truncated, using the
  * two recall tools that read the append-only durable log.
  */
-export const RECALL_GUIDE = "RECALL: append-only log — nothing is lost. Every pointer printed here pastes back verbatim into `recall`: type \"seq\" with the id from `(seq N)` / `(seqs A-B)` / `#N`; \"result\" with N from `-> result N`; \"checkpoint\" with the N from `[checkpoint N]` (`seq N` also works). `search` finds by keyword, regex or prose; `touched_files` lists files this session touched.";
+export const RECALL_GUIDE = "RECALL: append-only log — nothing is lost. Every pointer printed here pastes back verbatim into `recall`: type \"seq\" with the id from `(seq N)` / `(seqs A-B)` / `#N`; \"result\" with N from `-> result N`; \"checkpoint\" with the N from `[checkpoint N]` (`seq N` also works). `search` finds by keyword, regex or prose; `touched_files` lists files this session touched. A pointer reading `(seq R <- original S)` marks a shadow copy (a pruned tool result): R is the text shown here, S the pre-prune original — recall S for all of it.";
 
 /**
  * Per-node reference marker: the durable seq is the lossless pointer. */
 function seqRef(seq) {
   return `seq ${seq}`;
+}
+
+/**
+ * Replacement provenance for one node, or `""` when the node's surface content
+ * is its own.
+ *
+ * Since 0.2 the host can land a *shadow copy* of another event on the surface:
+ * `tool-result-pruner` replaces an oversized tool result with a head/middle/tail
+ * prune (`surfaceOp: { op: "replace", … }`) and cites the node it shadowed
+ * through the public `SessionEvent.sourceEventSeqs` field, which `SurfaceIntent`
+ * requires for every replacement. The surface therefore names the replacement,
+ * and the seq the checkpoint prints is the *pruned* one — recalling it hands back
+ * the prune, not the text the model may actually need.
+ *
+ * The pre-replacement original is still in the append-only log, so a node whose
+ * single cited source is an earlier event prints `seq R <- original S`: `R` is
+ * what the checkpoint shows, `S` the full original. Only a replacement qualifies:
+ * an `op: "append"` result also cites sources (its own tool call) and nothing was
+ * shadowed there, so `index.js` hands this field over for replacements alone.
+ * Multi-source replacements (a checkpoint node shadows its whole span) and
+ * checkpoint sources are left alone — their provenance is already carried by the
+ * checkpoint markers.
+ * @param node - compiled node (`{ seq, message, originalSeqs }`).
+ * @returns `" <- original S"`, or `""` when there is nothing to add.
+ */
+export function originalRef(node) {
+  const originals = node?.originalSeqs;
+  if (!Array.isArray(originals) || originals.length !== 1) return "";
+  const [original] = originals;
+  if (!Number.isSafeInteger(original) || original < 0 || original === node.seq) return "";
+  if (isCheckpointSource(node.message?.source)) return "";
+  return ` <- original ${original}`;
+}
+
+/**
+ * Pointer text for one node: its durable seq plus any replacement provenance.
+ * @param node - compiled node.
+ * @returns the pointer text printed inside parentheses.
+ */
+function nodeRef(node) {
+  return `${seqRef(node.seq)}${originalRef(node)}`;
 }
 
 /**
@@ -824,6 +869,9 @@ export function compileNodes(nodes, config, budgets) {
       const raw = projectToolResultText(first.content ?? []);
       resultInfoByCallId.set(first.toolCallId, {
         seq: node.seq,
+        // Replacement provenance of the *result* node: a pruned result prints as
+        // `-> result R <- original S` so the full text stays addressable.
+        annotation: originalRef(node),
         isError: first.isError === true,
         tokens: raw.length === 0 ? 0 : estimateEntryTokens(raw)
       });
@@ -884,7 +932,7 @@ export function compileNodes(nodes, config, budgets) {
           const text = sanitize(block.text ?? "");
           if (text.trim().length === 0) continue;
           header = roleHeader("assistant", node.seq);
-          const kept = truncateTokens(text, effective.textTokens, seqRef(node.seq));
+          const kept = truncateTokens(text, effective.textTokens, nodeRef(node));
           pushEntry(node.seq, header + kept.text, "text", { role: "assistant" });
           continue;
         }
@@ -896,7 +944,7 @@ export function compileNodes(nodes, config, budgets) {
           const text = sanitize(block.text ?? "");
           if (text.trim().length === 0) continue;
           header = roleHeader("assistant", node.seq);
-          const kept = truncateTokens(text, effective.textTokens, seqRef(node.seq));
+          const kept = truncateTokens(text, effective.textTokens, nodeRef(node));
           pushEntry(node.seq, header + kept.text, "reasoning");
           continue;
         }
@@ -936,12 +984,12 @@ export function compileNodes(nodes, config, budgets) {
             continue;
           }
           const resultSeq = outcome?.seq;
-          const ref = resultSeq === undefined ? seqRef(node.seq) : `${seqRef(node.seq)} -> result ${resultSeq}`;
+          const ref = resultSeq === undefined ? nodeRef(node) : `${nodeRef(node)} -> result ${resultSeq}${outcome?.annotation ?? ""}`;
           // Report what the dropped result costs: the agent has no other way to
           // see the price of its own tool output, and that is the signal that
           // teaches it which calls are dear.
           const cost = outcome === undefined || outcome.tokens === 0 ? "" : ` [${formatTokens(outcome.tokens)} tokens dropped]`;
-          const kept = truncateTokens(oneLine, effective.toolCallTokens, seqRef(node.seq));
+          const kept = truncateTokens(oneLine, effective.toolCallTokens, nodeRef(node));
           debugLog(config, "tool", `seq=${node.seq} name=${name} ${diag} line=${JSON.stringify(oneLine.slice(0, 80))} truncated=${kept.truncated} ref=${ref} resultTokens=${outcome === undefined ? 0 : outcome.tokens}`);
           // The ranking scores the same argument the one-liner renders, so a
           // `pwsh "npm test"` row outranks `pwsh "cd /tmp"`.
@@ -951,19 +999,19 @@ export function compileNodes(nodes, config, budgets) {
         if (block.type === "image") {
           stats.images += 1;
           header = roleHeader("assistant", node.seq);
-          pushEntry(node.seq, header + `[image] (${seqRef(node.seq)})`, "media");
+          pushEntry(node.seq, header + `[image] (${nodeRef(node)})`, "media");
           continue;
         }
         if (block.type === "document") {
           stats.documents += 1;
           header = roleHeader("assistant", node.seq);
-          pushEntry(node.seq, header + `[document] (${seqRef(node.seq)})`, "media");
+          pushEntry(node.seq, header + `[document] (${nodeRef(node)})`, "media");
           continue;
         }
         /* unknown merge-extensible block types render as labels */
         {
           header = roleHeader("assistant", node.seq);
-          pushEntry(node.seq, header + `[${String(block.type)}] (${seqRef(node.seq)})`, "media");
+          pushEntry(node.seq, header + `[${String(block.type)}] (${nodeRef(node)})`, "media");
 
         }
       }
@@ -985,7 +1033,7 @@ export function compileNodes(nodes, config, budgets) {
           // Size the row exactly as it would have been compiled, so the saved
           // total is the real budget this node stops consuming.
           const raw = projectToolResultText(message.content);
-          const cost = raw.length === 0 ? 0 : estimateEntryTokens(truncateTokens(raw, effective.userTextTokens, seqRef(node.seq)).text);
+          const cost = raw.length === 0 ? 0 : estimateEntryTokens(truncateTokens(raw, effective.userTextTokens, nodeRef(node)).text);
           stats.injectedSkipped += 1;
           stats.injectedSkippedTokens += cost;
           stats.injectedByKey[key] = (stats.injectedByKey[key] ?? 0) + 1;
@@ -1022,7 +1070,7 @@ export function compileNodes(nodes, config, budgets) {
       const report = subagentReportOf(message.source, projectToolResultText(message.content));
       if (report !== null) {
         stats.subagentReports += 1;
-        const keptReport = truncateTokens(report.body, effective.userTextTokens, seqRef(node.seq));
+        const keptReport = truncateTokens(report.body, effective.userTextTokens, nodeRef(node));
         pushEntry(node.seq, roleHeader("subagent", node.seq) + fenceSubagentReport(report, keptReport.text), "text", { role: "subagent" });
         debugLog(config, "subagent", `seq=${node.seq} agent=${report.agentId} kind=${report.kind} chars=${report.body.length}`);
         continue;
@@ -1036,30 +1084,30 @@ export function compileNodes(nodes, config, budgets) {
           if (text.length === 0) continue;
           surviving += 1;
           header = roleHeader("user", node.seq);
-          const kept = truncateTokens(text, effective.userTextTokens, seqRef(node.seq));
+          const kept = truncateTokens(text, effective.userTextTokens, nodeRef(node));
           pushEntry(node.seq, header + kept.text, "text", { role: "user" });
         } else if (block.type === "image") {
           stats.images += 1;
           surviving += 1;
           header = roleHeader("user", node.seq);
-          pushEntry(node.seq, header + `[image] (${seqRef(node.seq)})`, "media");
+          pushEntry(node.seq, header + `[image] (${nodeRef(node)})`, "media");
         } else if (block.type === "document") {
           stats.documents += 1;
           surviving += 1;
           header = roleHeader("user", node.seq);
-          pushEntry(node.seq, header + `[document] (${seqRef(node.seq)})`, "media");
+          pushEntry(node.seq, header + `[document] (${nodeRef(node)})`, "media");
         } else {
           const text = sanitize(block.text ?? "");
           if (text.length === 0) continue;
           surviving += 1;
           header = roleHeader("user", node.seq);
-          const kept = truncateTokens(text, effective.userTextTokens, seqRef(node.seq));
+          const kept = truncateTokens(text, effective.userTextTokens, nodeRef(node));
           pushEntry(node.seq, header + kept.text, "text", { role: "user" });
         }
       }
       if (surviving === 0) {
         stats.noiseElided += 1;
-        pushEntry(node.seq, `${roleHeader("user", node.seq)}* [user message elided: noise-only] (${seqRef(node.seq)})`, "note");
+        pushEntry(node.seq, `${roleHeader("user", node.seq)}* [user message elided: noise-only] (${nodeRef(node)})`, "note");
       }
     }
   }

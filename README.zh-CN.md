@@ -44,6 +44,8 @@ next question
 
 Recall 能取回**一切**：文本、推理过程、工具调用的完整参数、嵌套的工具结果；只在日志里出现过的事件会以带标签的原始数据展示；找不到的 seq 会明确报错。`maxRecallTokens` 预算（默认 **16000**）超限时会截断并标注来源、统计跳过多少；搜索限制展示条数（`maxSearchHits`，默认 **50**）。这两个插件是独立的一行，可以挂在**任何**压缩引擎旁边——它们只读日志，不依赖本引擎。
 
+指针有时指向的是一份**影子副本**：dsh 0.2 的 `tool-result-pruner` 会把超预算的工具结果换成"头/中/尾"剪枝节点，于是 surface 上那个 seq 装的是剪枝版，而剪枝前的原文仍在 append-only 日志里、就是替换事件声明的那个 seq。编译器把两端都印出来——`(seq 512 <- original 7)`——这个写法可以直接粘回 `recall`：取前一个得到检查点里显示的内容，取后一个得到完整原文。另一种情况是**落盘**：`dsh-spill-policy` 在写入时就把超预算结果限定为 `头 + 尾 + (N bytes omitted. Full formatted result stored at: <路径>. …)`，所以日志里存的本就是有界文本；我们的摘录是尾部锚定的，这条通知不会被截掉，它给的路径就是取全文的入口。
+
 搜索有两种模式，由查询本身决定。单个词、或含正则元字符的查询按**单个模式**扫描，命中的事件逐行列出匹配行并带行号。**多词查询**走 BM25-lite 对整份语料排序，最相关的事件排在前面，每条只在首个命中处截取一段带行号的上下文——所以「为什么计数器会溢出」由真正讨论它的那些事件来回答，而不是"提到其中一个词"的所有事件。排序结果会丢掉低于最高分 **20%** 的长尾，但只对**去重后 ≥2 个有效词**的查询生效（同一个词重复或大小写变化仍算单词查询）。所有被扣掉的匹配都会如实报告（`已展示 M 中的 N 个匹配事件`、`N 条低相关匹配已隐藏`、`[另有 N 个匹配事件被省略]`），不会悄悄少报。带尾随 `?`、`.` 的整句话被正则路径判为"没有命中"时会**回落到排序路径**，而不是直接回"没找到"（上游在真实会话上实测这个门槛把零命中率从 47.5% 降到 1.1%）。
 
 搜索永远**不匹配自己的痕迹**：`/recall` 的输出本身就是一条持久用户消息，`recall`/`search`/`touched_files` 三个工具也会把调用参数和结果留在日志里——不排除这三者的话，同一个查询会不断匹配上一次自己的输出，命中数每查一次涨一次（在一份真实会话里，43 条命中里有 40 条是它自己）。
@@ -96,7 +98,7 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | `toolKeyFields` | 内置 | 额外的"工具名 → 参数里的关键字段"映射，用于单行展示 |
 | `toolArgTools` | 见 compiler | 白名单：这些工具的关键参数会显示在单行里（`read`/`write`/`edit`/`glob`/`grep`/`bash`/`shell`/`web_search`/`skill`/`subagent`/…）；其余工具只显示名字 |
 | `hideTools` | `todo_write` | 完全从检查点里去掉的内部管理工具。只有最新一份待办列表为真，更早的写入都是被取代的噪音；显式列表会替换这个默认值 |
-| `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）与技能目录（`skill-catalog:catalog`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
+| `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）、技能目录（`skill-catalog:catalog`）与 0.2 的重复调用提醒（`repeat-tool-reminder:-`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
 | `skipInjectTypes` | 见 compiler | 自定义要跳过的注入来源，键是 `<kind>:<name>`（`{kind:'plugin',plugin:'x'}` → `plugin:x`；`{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`）。**空数组 = 没设置**（回退默认表）；要"什么都不跳"请用 `skipPerTurnInjections: false` |
 | `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`compactAtTokens`/`retainTurns`/`retainTokens` |
 | `compactionRetries` / `maxOverflowRetries` | `1` / `1` | 重试次数，含义和官方引擎一样 |

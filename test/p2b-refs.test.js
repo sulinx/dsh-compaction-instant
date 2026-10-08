@@ -32,8 +32,11 @@ test("parseRefToken normalizes every form the engine prints", () => {
   assert.deepEqual(parseRefToken("seqs 3-7"), { body: "3-7", kind: "seq", hashed: false });
   assert.deepEqual(parseRefToken("result 4"), { body: "4", kind: "result", hashed: false });
   assert.deepEqual(parseRefToken("checkpoint 2"), { body: "2", kind: "checkpoint", hashed: false });
-  // The `#` sits inside the printed form only when it is the outer marker.
-  assert.deepEqual(parseRefToken("(seq 12 -> result 13)"), { body: "12 -> result 13", kind: "seq", hashed: false });
+  // A printed tool-call one-liner names both ends: the tail is the result, the
+  // head stays addressable, so `type:"result"` and `type:"seq"` both resolve it.
+  assert.deepEqual(parseRefToken("(seq 12 -> result 13)"), { body: "13", kind: "result", hashed: false, head: "12" });
+  // Replacement provenance is part of the pointer, not of the selection.
+  assert.deepEqual(parseRefToken("(seq 13 <- original 12)"), { body: "13", kind: "seq", hashed: false });
   assert.deepEqual(parseRefToken(""), { body: "", kind: undefined, hashed: false });
 });
 
