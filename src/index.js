@@ -62,6 +62,7 @@ const COMPILER_MODEL = "vcc-compiler";
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
   "thresholdRatio",
+  "compactAtTokens",
   "retainTurns",
   "retainTokens",
   // Accepted for drop-in configuration compatibility with compaction-basic;
@@ -168,6 +169,7 @@ function pickSettingsFields(config) {
     ...config.checkpointCap !== undefined ? { checkpointCap: config.checkpointCap } : {},
     ...config.auto !== undefined ? { auto: config.auto } : {},
     ...config.thresholdRatio !== undefined ? { thresholdRatio: config.thresholdRatio } : {},
+    ...config.compactAtTokens !== undefined ? { compactAtTokens: config.compactAtTokens } : {},
     ...config.retainTurns !== undefined ? { retainTurns: config.retainTurns } : {},
     ...config.retainTokens !== undefined ? { retainTokens: config.retainTokens } : {},
     ...config.skipPerTurnInjections !== undefined ? { skipPerTurnInjections: config.skipPerTurnInjections } : {},
@@ -193,6 +195,7 @@ export function resolveConfig(rawConfig = {}) {
   const debugLogPath = config.debugLogPath ?? (typeof process !== "undefined" && process.env?.DSH_HOME ? `${process.env.DSH_HOME}/compaction-debug.log` : "/tmp/dsh-compaction-debug.log");
   return deepFreeze({
     thresholdRatio,
+    compactAtTokens: config.compactAtTokens,
     retainTurns,
     retainTokens,
     maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -243,6 +246,7 @@ export function resolveTargetPolicy(config, target) {
       model: target.model
     },
     thresholdRatio: override?.thresholdRatio ?? config.thresholdRatio,
+    compactAtTokens: override?.compactAtTokens ?? config.compactAtTokens,
     retainTurns: override?.retainTurns ?? config.retainTurns,
     retainTokens: override?.retainTokens ?? config.retainTokens,
     summarizationProvider: override?.summarizationProvider ?? config.summarizationProvider ?? "",
@@ -262,11 +266,19 @@ export function resolveTargetPolicy(config, target) {
 export function resolveCompactSpec(policy, contextWindow) {
   const targetKey = `${policy.target.provider}/${policy.target.model}`;
   if (!Number.isInteger(contextWindow) || contextWindow <= 0) throw new TargetPressureConfigError(targetKey, `InstantCompactionConfig: contextWindow (${contextWindow}) must be a positive integer`);
-  const thresholdTokens = Math.floor(contextWindow * policy.thresholdRatio);
+  const ratioThreshold = Math.floor(contextWindow * policy.thresholdRatio);
+  // An explicitly configured absolute trigger (`compactAtTokens`, in surface
+  // tokens) is a hard fire level; the ratio stays on as a headroom guard so a
+  // window too small to hold the absolute still triggers in proportion —
+  // `min(absolute, ratio × window)`, upstream pi-vcc's rule. With no absolute
+  // configured the ratio alone decides, which is the historical behavior.
+  const thresholdTokens = policy.compactAtTokens === undefined ? ratioThreshold : Math.min(policy.compactAtTokens, ratioThreshold);
   return deepFreeze({
     target: { ...policy.target },
     contextWindow,
     thresholdRatio: policy.thresholdRatio,
+    compactAtTokens: policy.compactAtTokens,
+    ratioThresholdTokens: ratioThreshold,
     thresholdTokens,
     retainTurns: policy.retainTurns,
     retainTokens: policy.retainTokens,
@@ -302,12 +314,14 @@ function assertModelPolicy(source, name) {
 /** Validate the fields common to defaults and exact-target partial overrides. */
 function validatePolicy(config, name) {
   const thresholdRatio = config.thresholdRatio;
+  const compactAtTokens = config.compactAtTokens;
   const retainTurns = config.retainTurns;
   const retainTokens = config.retainTokens;
   const maxTokens = config.maxTokens;
   const compactionRetries = config.compactionRetries;
   const maxOverflowRetries = config.maxOverflowRetries;
   if (thresholdRatio !== undefined) assertRatio(`${name}.thresholdRatio`, thresholdRatio);
+  if (compactAtTokens !== undefined) assertPositiveInteger(`${name}.compactAtTokens`, compactAtTokens);
   if (retainTurns !== undefined) assertPositiveInteger(`${name}.retainTurns`, retainTurns);
   if (retainTokens !== undefined) assertNonNegativeInteger(`${name}.retainTokens`, retainTokens);
   if (maxTokens !== undefined) assertPositiveInteger(`${name}.maxTokens`, maxTokens);
@@ -507,6 +521,8 @@ export class InstantCompactionEngine extends CompactionEngine {
   ];
   static Config = z.object({
     thresholdRatio: volatileField(thresholdRatioSchema),
+    /** Absolute pressure trigger in surface tokens; the ratio stays a headroom guard. */
+    compactAtTokens: volatileField(maxTokensSchema),
     retainTurns: volatileField(retainTurnsSchema),
     retainTokens: volatileField(retainTokensSchema),
     checkpointScale: checkpointScaleSchema,
@@ -546,6 +562,7 @@ export class InstantCompactionEngine extends CompactionEngine {
     checkpointCap: z.number().step(1).min(1).default(DEFAULT_CHECKPOINT_CAP),
     auto: z.boolean().default(true),
     thresholdRatio: z.number().min(0).max(1).default(DEFAULT_THRESHOLD_RATIO),
+    compactAtTokens: z.number().step(1).min(1),
     retainTurns: z.number().step(1).min(1).default(DEFAULT_RETAIN_TURNS),
     retainTokens: z.number().step(1).min(0).default(DEFAULT_RETAIN_TOKENS),
     skipPerTurnInjections: z.boolean().default(DEFAULT_SKIP_PER_TURN_INJECTIONS),
@@ -798,12 +815,22 @@ export class InstantCompactionEngine extends CompactionEngine {
     const targetKey = `${target.provider}/${target.model}`;
     if (context === undefined) throw new TargetPressureConfigError(targetKey, `compaction-instant: no context capacity for ${targetKey}; configure contextWindow on that adapter model`);
     const spec = resolveCompactSpec(policy, context.contextWindow);
-    if (measurement.totalTokens < spec.thresholdTokens) return null;
+    // Pressure is the part of the measurement a compaction can actually shrink.
+    // `totalTokens` prices the last provider usage (input + output + cache read +
+    // cache write) plus the signed surface delta, so a large cache read leaves a
+    // floor no checkpoint can remove and the threshold stays crossed: compaction
+    // then fires at every step boundary and ends in repeated no-op checkpoints.
+    // Upstream pi-vcc measured a live request of `inputTokens 2 /
+    // cacheReadTokens 493321` against a ~350k surface and switched the trigger to
+    // `surfaceTokens` (the sum of the current surface node prices) for exactly
+    // this reason. Hosts that do not expose it fall back to the old reading.
+    const pressureOf = (value) => value.surfaceTokens ?? value.totalTokens;
+    if (pressureOf(measurement) < spec.thresholdTokens) return null;
     if (prune !== undefined) {
       prune.pruneSession(agent.session);
       measurement = meter.measure(agent.session);
     }
-    if (measurement.totalTokens < spec.thresholdTokens) return null;
+    if (pressureOf(measurement) < spec.thresholdTokens) return null;
     let result = null;
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
       const range = selectCompactableRange(agent.session, measurement, spec.retainTurns, spec.retainTokens);
@@ -815,9 +842,15 @@ export class InstantCompactionEngine extends CompactionEngine {
       }
       result = await this.compactRegion(range.start, range.end, agent, signal, range.tail);
       measurement = meter.measure(agent.session);
-      if (measurement.totalTokens < spec.thresholdTokens) return result;
+      if (pressureOf(measurement) < spec.thresholdTokens) return result;
     }
-    throw new Error(`compaction still above threshold after ${spec.compactionRetries + 1} compaction attempts (${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens})`);
+    // A landed compaction is a success even when pressure remains above the
+    // threshold: the checkpoint is durably written, and the residue is often the
+    // provider-usage floor above. Throwing here surfaced as "step compaction
+    // failed" in the pre-step listener for a compaction that had, in fact,
+    // succeeded — so report it and return the result instead.
+    engineDebug(this.config, `pressure remains above threshold after ${spec.compactionRetries + 1} attempt(s): surface=${pressureOf(measurement)} threshold=${spec.thresholdTokens}`);
+    return result;
   }
   /**
    * Compact one inclusive positional range from the agent-owned surface using

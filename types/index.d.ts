@@ -14,6 +14,8 @@ export interface ModelPolicyOverride {
     provider: string;
     model: string;
     thresholdRatio?: number;
+    /** Absolute pressure trigger in surface tokens for this target; the ratio stays a headroom guard. */
+    compactAtTokens?: number;
     /** Mandatory complete recent turns kept verbatim for this target. */
     retainTurns?: number;
     /** Retained-region token ceiling for this target; never exceeded by extension. */
@@ -32,6 +34,14 @@ export interface ModelPolicyOverride {
 export interface InstantCompactionConfig {
     /** Request-pressure fraction that triggers automatic compaction. Default 0.5. */
     thresholdRatio?: number;
+    /**
+     * Absolute pressure trigger, in **surface** tokens (the priced current
+     * surface, not the provider-usage-inclusive total). When set, automatic
+     * compaction fires at `min(compactAtTokens, floor(contextWindow ×
+     * thresholdRatio))` — the absolute is the fire level and the ratio stays a
+     * headroom guard. Unset (default) keeps the ratio as the only trigger.
+     */
+    compactAtTokens?: number;
     /** Preferred complete recent turns kept verbatim; never overrides the ceiling. Default 1. */
     retainTurns?: number;
     /**

@@ -78,6 +78,7 @@ All fields optional; defaults shown.
 | Key | Default | Meaning |
 |---|---|---|
 | `thresholdRatio` | `0.5` | Fraction of the routed model's context window that triggers automatic compaction |
+| `compactAtTokens` | — | **Absolute** trigger in **surface** tokens (the priced current surface, i.e. what a compaction can actually shrink). When set, automatic compaction fires at `min(compactAtTokens, floor(contextWindow × thresholdRatio))`: the absolute is the fire level, the ratio stays a headroom guard. Unset means the ratio alone decides. Worth setting when one routed target runs close to its window: the trigger no longer waits for the provider-usage total (which includes cache reads no compaction can remove) to fall back under the ratio |
 | `retainTurns` | `1` | Preferred complete recent turns kept verbatim (automatic and manual `/compact`); never overrides the ceiling |
 | `retainTokens` | `5120` | **Hard** retained-region token ceiling: older whole turns are added only while the total fits, and when the latest turn alone exceeds it, only the fitting suffix of that turn is kept |
 | `auto` | `true` | Register `agent/pre-step` pressure and `agent/request-error` overflow recovery |
@@ -95,7 +96,7 @@ All fields optional; defaults shown.
 | `hideTools` | — | Bookkeeping tools dropped from the checkpoint entirely |
 | `skipPerTurnInjections` | `true` | Keep host **per-turn injections** out of the checkpoint: the runtime-context/memory snapshot (`runtime-context:snapshot` on 0.1.7, `plugin:@deepseek-ai/dsh-system-prompt` on ≤0.1.6 — both are accepted) and the skill catalog (`skill-catalog:catalog`). Both are re-sent verbatim with every request, and every copy stays in the append-only log (`recall`/`search`), so compiling them only spends budget. Dropped nodes leave **one** consolidated marker (`[N per-turn injection event(s) omitted: …]`). **Only the compiled view is filtered**: region selection, token pricing and the retained tail are untouched, so `[checkpoint N]`/`(seq N)` pointers and kept-turn counts are unchanged |
 | `skipInjectTypes` | see compiler | Custom skip list, keyed `<kind>:<name>` (`{kind:'plugin',plugin:'x'}` → `plugin:x`; `{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`). An **empty list means unset** (falls back to the defaults); use `skipPerTurnInjections: false` to skip nothing |
-| `modelPolicies` | — | Per provider/model overrides of `thresholdRatio`/`retainTurns`/`retainTokens` |
+| `modelPolicies` | — | Per provider/model overrides of `thresholdRatio`/`compactAtTokens`/`retainTurns`/`retainTokens` |
 | `compactionRetries` / `maxOverflowRetries` | `1` / `1` | Retry budgets, same semantics as basic |
 | `summarizationProvider` / `summarizationModel` | — | Accepted for config drop-in compatibility; **inert** — this backend never routes a model |
 
@@ -116,6 +117,7 @@ Since 0.1.4 the engine exposes a **user-owned settings namespace** (`compaction-
 | `checkpointCap` | Total compiler-token budget for one checkpoint (default 65536) |
 | `auto` | Register automatic between-step compaction |
 | `thresholdRatio` | Context-window fraction that triggers automatic compaction (default `0.5`) |
+| `compactAtTokens` | Absolute surface-token trigger; with the ratio it forms `min(compactAtTokens, window × ratio)` (default: unset) |
 | `retainTurns` | Preferred complete recent turns kept verbatim (default `1`) |
 | `retainTokens` | **Hard** retained-token ceiling: whole turns (or, when the latest turn is larger, a fitting suffix of it) never exceed it (default `5120`) |
 

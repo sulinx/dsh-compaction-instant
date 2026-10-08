@@ -76,6 +76,7 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `thresholdRatio` | `0.5` | 上下文用到多大比例时自动触发压缩（0.5 = 用到一半） |
+| `compactAtTokens` | — | **绝对**触发阈值，按**可压缩表面**的 token 数计（即当前表面的价格，压缩真正能减少的那部分）。设了它则取 `min(compactAtTokens, floor(窗口 × thresholdRatio))`：绝对阈值是点火线，比例退化为余量守卫。不设则只用比例。窗口吃紧的模型值得设：触发不再等"含 cache 读取、压缩消不掉"的用量总量掉回比例线以下 |
 | `retainTurns` | `1` | 优先保留的完整回合数（自动压缩和手动 `/compact` 都按此规则；不突破上限） |
 | `retainTokens` | `5120` | 保留区 token **硬上限**：向前补足完整回合时总量永不超出；若最近回合本身就超过它，只保留该回合内能装下的部分 |
 | `auto` | `true` | 开启自动压缩：监听 `agent/pre-step` 压力事件和 `agent/request-error` 溢出恢复 |
@@ -93,7 +94,7 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | `hideTools` | — | 完全从检查点里去掉的内部管理工具 |
 | `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）与技能目录（`skill-catalog:catalog`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
 | `skipInjectTypes` | 见 compiler | 自定义要跳过的注入来源，键是 `<kind>:<name>`（`{kind:'plugin',plugin:'x'}` → `plugin:x`；`{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`）。**空数组 = 没设置**（回退默认表）；要"什么都不跳"请用 `skipPerTurnInjections: false` |
-| `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`retainTurns`/`retainTokens` |
+| `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`compactAtTokens`/`retainTurns`/`retainTokens` |
 | `compactionRetries` / `maxOverflowRetries` | `1` / `1` | 重试次数，含义和官方引擎一样 |
 | `summarizationProvider` / `summarizationModel` | — | 仅为兼容官方配置而接受；**不起作用**——本引擎从不调用模型 |
 
@@ -114,6 +115,7 @@ recall 工具和命令插件各自接受 `{ maxRecallTokens?: 16000, maxSearchHi
 | `checkpointCap` | 单个检查点的编译预算（默认 65536） |
 | `auto` | 注册步骤间自动压缩 |
 | `thresholdRatio` | 触发自动压缩的上下文窗口占比（默认 `0.5`） |
+| `compactAtTokens` | 绝对触发阈值（表面 token）；与比例合成 `min(compactAtTokens, 窗口 × 比例)`（默认不设） |
 | `retainTurns` | 优先保留的完整回合数（默认 `1`；不突破上限） |
 | `retainTokens` | 保留区 token **硬上限**，补足回合或截取最近回合时永不超出（默认 `5120`） |
 
