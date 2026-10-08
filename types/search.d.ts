@@ -59,6 +59,10 @@ export interface SearchResult {
     mode: SearchQueryMode;
     /** Events containing at least one match (after excluding the search surface itself). */
     totalMatches: number;
+    /** Events of the turn in progress, left out of the scan. */
+    skippedTurnEvents: number;
+    /** The turn number that is still open, when one is. */
+    openTurn?: number;
     /** Ranked matches dropped by the relative floor (0 on the regex path). */
     floorDropped: number;
     /** Rendered hits (bounded by `maxSearchHits` and the token budget). */

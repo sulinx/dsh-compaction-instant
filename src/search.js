@@ -458,7 +458,9 @@ function renderResult(result) {
       totalMatches: result.totalMatches,
       shown: result.hits.length,
       floorDropped: result.floorDropped,
-      truncated: result.truncated
+      truncated: result.truncated,
+      skippedTurnEvents: result.skippedTurnEvents,
+      openTurn: result.openTurn
     }),
     ...result.hits.map((hit) => hit.text),
     ...(result.omitted > 0
@@ -654,6 +656,35 @@ function scanTerms(context, source, config) {
  * @returns matching events with their seq pointers and the rendered text.
  * @throws InvalidSearchPatternError | SearchBudgetExceededError
  */
+/**
+ * Split one log into the events a search may read and the turn in progress.
+ *
+ * A search runs *inside* a turn, so the agent's own question — and everything
+ * it has produced so far in this turn — is the newest content in the log.
+ * Matching it is how a search made to answer a question returns the question
+ * itself as the top hit (upstream pi-vcc: "the agent's own question no longer
+ * comes back as the first result"). Events after the last unmatched
+ * `turn/start` are that turn; on an idle session nothing is skipped.
+ * @param events - the log's events in order.
+ * @returns `{ events, openTurn, skippedEvents }`.
+ */
+function turnScopedEvents(events) {
+  let openTurnStart;
+  let openTurn;
+  for (const event of events) {
+    if (event?.type === "turn/start") {
+      openTurnStart = event.seq;
+      openTurn = event.data?.turn;
+    } else if (event?.type === "turn/end" && openTurnStart !== undefined) {
+      openTurnStart = undefined;
+      openTurn = undefined;
+    }
+  }
+  if (openTurnStart === undefined) return { events, openTurn: undefined, skippedEvents: 0 };
+  const searchable = events.filter((event) => typeof event?.seq !== "number" || event.seq < openTurnStart);
+  return { events: searchable, openTurn, skippedEvents: events.length - searchable.length };
+}
+
 export function searchSession(session, patternSource, config) {
   const source = String(patternSource ?? "").trim();
   if (source.length === 0) throw new InvalidSearchPatternError(patternSource, "pattern is empty");
@@ -668,7 +699,10 @@ export function searchSession(session, patternSource, config) {
   // events its candidates came from, and a non-dense host array must resolve
   // them by seq rather than by position.
   const index = createEventIndex(session);
-  const context = { session, events: index.events, index, checkBudget, selfCalls: new Set() };
+  // The turn in progress is left out of the scan (see `turnScopedEvents`): a
+  // search cannot answer a question by quoting the question.
+  const scoped = turnScopedEvents(index.events);
+  const context = { session, events: scoped.events, index, checkBudget, selfCalls: new Set() };
 
   let mode = queryMode(source);
   let literal = false;
@@ -699,6 +733,8 @@ export function searchSession(session, patternSource, config) {
     omitted: scan.totalMatches - (scan.floorDropped ?? 0) - scan.hits.length,
     truncated: scan.truncated,
     terms: scan.terms,
+    skippedTurnEvents: scoped.skippedEvents,
+    openTurn: scoped.openTurn,
     tokens: 0,
     text: ""
   };

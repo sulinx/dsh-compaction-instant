@@ -13,6 +13,10 @@ export declare const DEFAULT_MAX_RECALL_TOKENS: number;
 export declare const MAX_RECALL_SPAN: number;
 /** Ceiling on the total number of seqs one reference may expand to. */
 export declare const MAX_RECALL_SEQS: number;
+/** Entries returned per page when a `page` is requested. */
+export declare const RECALL_PAGE_SIZE: number;
+/** Paired tool results are clipped to this many characters. */
+export declare const PAIRED_RESULT_CHARS: number;
 
 /** One inclusive seq range parsed from a selection string. */
 export interface SeqSelection {
@@ -43,6 +47,14 @@ export interface RecallResult {
     skipped: number;
     /** Whether any entry was cut by the budget. */
     truncated: boolean;
+    /** Tool results paired into the same recall call (clipped). */
+    pairedResults: number;
+    /** 1-based page actually returned. */
+    page: number;
+    /** Total pages the selection would need at `RECALL_PAGE_SIZE`. */
+    totalPages: number;
+    /** Entries the selection expands to before paging. */
+    totalRequested: number;
     /** Density-aware token total of the joined text. */
     tokens: number;
 }
@@ -68,4 +80,14 @@ export declare function findCheckpointSeqs(session: RecallableSession): number[]
 /** Resolve one typed recall reference (`seq` / `result` / `checkpoint`) into seq ranges. */
 export declare function resolveRecallReference(session: RecallableSession, type: 'seq' | 'result' | 'checkpoint' | string, id: string): { selections: SeqSelection[]; errors: string[] };
 /** Recall the full original content of the requested seqs from one session log. */
-export declare function recallSession(session: RecallableSession, selections: readonly SeqSelection[], config: { maxRecallTokens: number }): RecallResult;
+export declare function recallSession(session: RecallableSession, selections: readonly SeqSelection[], config: {
+    maxRecallTokens: number;
+    /** 1-based page over the expanded selection (defaults to the whole selection). */
+    page?: number;
+    /** Entries per page (defaults to `RECALL_PAGE_SIZE`). */
+    pageSize?: number;
+    /** Pair a recalled tool call with its result group (default true). */
+    includePairedResults?: boolean;
+    /** Clip width for one paired result (defaults to `PAIRED_RESULT_CHARS`). */
+    pairedResultChars?: number;
+}): RecallResult;

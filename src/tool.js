@@ -22,7 +22,7 @@
  */
 import { HarnessError } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { DEFAULT_MAX_RECALL_TOKENS, recallSession, resolveRecallReference } from "./recall.js";
+import { DEFAULT_MAX_RECALL_TOKENS, RECALL_PAGE_SIZE, recallSession, resolveRecallReference } from "./recall.js";
 import { collectTouchedFiles, DEFAULT_MAX_SEARCH_HITS, InvalidSearchPatternError, SEARCH_BUDGET_MS, SearchBudgetExceededError, searchSession } from "./search.js";
 
 export const name = "tool-recall";
@@ -39,7 +39,7 @@ export function resolveConfig(config = {}) {
   return { maxRecallTokens, maxSearchHits, searchBudgetMs };
 }
 
-const RECALL_DESCRIPTION = "Restore the exact original content of earlier events in THIS conversation by a typed reference. type=\"seq\" with a seq selection id (\"3-7,15\", \"seq 12\", \"seqs 3-7\" — the checkpoint marker forms) restores those events; type=\"result\" with the \"result N\" pointer from a tool-call one-liner (\"result 3\" or \"3\") restores that tool result; type=\"checkpoint\" with an ordinal (\"1\" = oldest, as in a \"[checkpoint N]\" elision line) or a \"seq N\" pointer restores that full checkpoint. The durable log is append-only, so recalled content is always the original tokens. To find events by keyword or regex instead, use the search tool.";
+const RECALL_DESCRIPTION = "Restore the exact original content of earlier events in THIS conversation by a typed reference. type=\"seq\" with a seq selection id (\"3-7,15\", \"seq 12\", \"seqs 3-7\" — the checkpoint marker forms) restores those events, and a tool call comes back together with the result it produced (clipped; recall that result by its `result N` pointer for all of it); type=\"result\" with the \"result N\" pointer from a tool-call one-liner (\"result 3\" or \"3\") restores that tool result; type=\"checkpoint\" with an ordinal (\"1\" = oldest, as in a \"[checkpoint N]\" elision line) or a \"seq N\" pointer restores that full checkpoint. A wide seq range is read in pages of " + RECALL_PAGE_SIZE + " entries: pass page=2 for the next one (the footer names it). The durable log is append-only, so recalled content is always the original tokens. To find events by keyword or regex instead, use the search tool.";
 
 const SEARCH_DESCRIPTION = "Search THIS conversation's durable event log by keyword, regular expression, or natural-language query (case-insensitive, Unicode-aware). Every event ever recorded is searchable, including content elided or truncated by compaction checkpoints — the log is append-only and untouched. A single word or a pattern with regex metacharacters is matched as one pattern and returns every matching event with its matching lines. A multi-word query is scored (BM25) over the whole log and returns the best-matching events, ranked, each with a short context window around its first match — so a prose question is answered by the events that actually discuss it rather than by every event containing one of its words; the tail below 20% of the top score is dropped and the drop is reported honestly. Results are capped (maxSearchHits) and the cap is always stated. A search never matches its own invocation or its own earlier output. Escape regex special characters (e.g. use \\\\( for a literal parenthesis). A pattern that nests unbounded quantifiers (such as (a+)+) is matched literally rather than as a regex, and a search that outruns its time budget is aborted with an error. Then call recall with a (seq N) pointer to restore any hit's full exact original content.";
 
@@ -55,6 +55,9 @@ const RECALL_OUTPUT = {
       missing: { type: "integer", required: true },
       skipped: { type: "integer", required: true },
       truncated: { type: "boolean", required: true },
+      pairedResults: { type: "integer", required: true },
+      page: { type: "integer", required: true },
+      totalPages: { type: "integer", required: true },
       tokens: { type: "integer", required: true }
     }
   },
@@ -94,18 +97,29 @@ const TOUCHED_OUTPUT = {
 };
 
 /** Shared execution of one typed recall request against the calling agent. */
-function executeRecall(exec, type, id, resolved) {
+function executeRecall(exec, type, id, resolved, page) {
   const agent = exec.agent;
   if (agent === undefined) throw new HarnessError("recall requires a calling agent with a session", "RECALL_AGENT_REQUIRED");
+  if (page !== undefined && (!Number.isInteger(page) || page < 1)) throw new HarnessError("recall: page must be a positive integer", "RECALL_INVALID_SELECTION");
   const { selections, errors } = resolveRecallReference(agent.session, type, id);
   if (errors.length > 0) throw new HarnessError(`invalid ${type} recall: ${errors.join("; ")}`, "RECALL_INVALID_SELECTION");
-  const recalled = recallSession(agent.session, selections, resolved);
+  const recalled = recallSession(agent.session, selections, { ...resolved, page });
+  // Name a parameter the chosen reference cannot use, instead of ignoring it
+  // silently: `page` only means something for a selection that spans more than
+  // one page, and an explicit `page: 1` is not reported (upstream pi-vcc's
+  // "Ignored:" line).
+  const ignored = page !== undefined && page > 1 && recalled.totalPages <= 1
+    ? `Ignored: page ${page} — this reference expands to ${recalled.totalRequested} entr${recalled.totalRequested === 1 ? "y" : "ies"} (one page of ${RECALL_PAGE_SIZE})\n\n`
+    : "";
   return {
-    text: recalled.text,
+    text: ignored + recalled.text,
     recalled: recalled.recalled,
     missing: recalled.missing,
     skipped: recalled.skipped,
     truncated: recalled.truncated,
+    pairedResults: recalled.pairedResults ?? 0,
+    page: recalled.page ?? 1,
+    totalPages: recalled.totalPages ?? 1,
     tokens: recalled.tokens
   };
 }
@@ -130,10 +144,14 @@ export function defineRecallTool(resolved) {
         type: "string",
         required: true,
         description: 'Type-dependent reference: "3-7,15" / "seq 12" for seq; "result 3" or "3" for result; "1" / "checkpoint 1" or "seq 12345" for checkpoint.'
+      },
+      page: {
+        type: "integer",
+        description: `1-based page when the reference expands to more than ${RECALL_PAGE_SIZE} entries (a wide seq range). Omitted: the whole selection is returned up to the recall budget.`
       }
     },
     output: RECALL_OUTPUT,
-    execute: (args, exec) => executeRecall(exec, args.type, args.id, resolved),
+    execute: (args, exec) => executeRecall(exec, args.type, args.id, resolved, args.page),
     presentCall: (args) => ({
       card: "generic",
       title: "Recall events",

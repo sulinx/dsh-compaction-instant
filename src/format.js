@@ -84,6 +84,10 @@ export function formatSearchHeader(summary) {
   if (summary.floorDropped !== undefined && summary.floorDropped > 0) {
     parts.push(`; ${summary.floorDropped} low-relevance match(es) hidden`);
   }
+  if (summary.skippedTurnEvents !== undefined && summary.skippedTurnEvents > 0) {
+    const turn = summary.openTurn === undefined ? "" : ` (turn ${summary.openTurn})`;
+    parts.push(`; the turn in progress${turn} is not searched (${summary.skippedTurnEvents} event(s) so far)`);
+  }
   parts.push("]");
   return parts.join("");
 }

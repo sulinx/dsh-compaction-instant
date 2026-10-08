@@ -36,6 +36,18 @@ export const MAX_RECALL_SPAN = 1000;
 export const MAX_RECALL_SEQS = 100000;
 
 /**
+ * Entries returned per page when a `page` is requested. Without a page the
+ * whole selection is expanded as before (bounded by the token budget); a page
+ * lets an agent read a long range in order instead of hitting the budget.
+ */
+export const RECALL_PAGE_SIZE = 20;
+/**
+ * Paired tool results are clipped to this many characters (upstream pi-vcc's
+ * 4,000). The full result is always one `type:"result"` call away.
+ */
+export const PAIRED_RESULT_CHARS = 4000;
+
+/**
  * Parse one seq selection string into ordered inclusive ranges.
  *
  * Accepted forms per comma-separated part: `12`, `3-7`, `seq 12`,
@@ -210,6 +222,59 @@ export function resolveRecallReference(session, type, id) {
 }
 
 /**
+ * Tool results that belong to the recalled event's own calls.
+ *
+ * A tool call and its result are two durable events, so restoring the call
+ * alone forces a second `type:"result"` call before the agent can see what its
+ * own command printed. The result is only paired when it sits in the same call
+ * group — the next `assistant/message` ends the group — and it is clipped, so
+ * the recall budget is not spent on one huge output; the full text stays one
+ * `type:"result"` call away.
+ * @param session - session-shaped value with `deriveEventMessage`.
+ * @param events - the log's events in order.
+ * @param positionOf - seq → index into `events`.
+ * @param seq - the recalled event's seq.
+ * @param message - the recalled event's derived message.
+ * @param already - seqs the caller asked for (never paired twice).
+ * @param chars - clip width for one paired result.
+ * @returns `[{ seq, text }]` in log order.
+ */
+function collectPairedResults(session, events, positionOf, seq, message, already, chars) {
+  const callIds = new Set();
+  for (const block of message.content ?? []) {
+    if (block.type === "tool-call" && typeof block.id === "string" && block.id.length > 0) callIds.add(block.id);
+  }
+  if (callIds.size === 0) return [];
+  const start = positionOf.get(seq);
+  if (start === undefined) return [];
+  const derive = typeof session.deriveEventMessage === "function" ? (event) => session.deriveEventMessage(event) : () => null;
+  const paired = [];
+  const seen = new Set();
+  for (let position = start + 1; position < events.length; position += 1) {
+    const event = events[position];
+    // A new assistant message ends this call group: anything after it belongs to
+    // a later call, so pairing it would misattribute the result.
+    if (event?.type === "assistant/message") break;
+    // The durable log carries a tool result either as its own `tool/result`
+    // event or as a `user/message` whose first block is a tool-result.
+    if (event?.type !== "tool/result" && event?.type !== "user/message") continue;
+    if (already.has(event.seq) || seen.has(event.seq)) continue;
+    const derived = derive(event);
+    const first = derived?.content?.[0];
+    if (first === undefined || first.type !== "tool-result" || !callIds.has(first.toolCallId)) continue;
+    seen.add(event.seq);
+    const raw = projectToolResultText(first.content ?? []);
+    const clipped = raw.length > chars ? `${raw.slice(0, chars)}...(${raw.length - chars} more chars)` : raw;
+    const error = first.isError === true ? " (errored)" : "";
+    paired.push({
+      seq: event.seq,
+      text: `[paired tool result seq ${event.seq}${error}${raw.length > chars ? `, clipped at ${chars} chars` : ""} — recall type:"result" id:"${event.seq}" for all of it]\n${clipped}`
+    });
+  }
+  return paired;
+}
+
+/**
  * Recall the full original content of the requested seqs from one session's
  * durable log. Message events project through `deriveEventMessage`; log-only
  * events render as a labeled data dump. The total output is bounded by
@@ -228,16 +293,29 @@ export function recallSession(session, selections, config) {
   // resolves seqs in a non-dense host array, where `events[seq]` would miss.
   const index = createEventIndex(session);
   const requested = expandSelections(selections);
+  const pageSize = config.pageSize ?? RECALL_PAGE_SIZE;
+  const totalPages = requested.length === 0 ? 1 : Math.max(1, Math.ceil(requested.length / pageSize));
+  // A page reads a long range in order; without one the whole selection is
+  // expanded as before (bounded by the token budget).
+  const page = config.page === undefined ? undefined : Math.min(Math.max(1, Math.floor(config.page)), totalPages);
+  const wanted = page === undefined ? requested : requested.slice((page - 1) * pageSize, page * pageSize);
+  const requestedSet = new Set(requested);
+  const positionOf = new Map();
+  if (config.includePairedResults !== false) {
+    for (let position = 0; position < index.events.length; position += 1) positionOf.set(index.events[position].seq, position);
+  }
+  const pairedChars = config.pairedResultChars ?? PAIRED_RESULT_CHARS;
   const entries = [];
   const seqs = [];
   let budget = maxRecallTokens;
   let truncated = false;
   let missing = 0;
   let skipped = 0;
-  for (let position = 0; position < requested.length; position += 1) {
-    const seq = requested[position];
+  let pairedResults = 0;
+  for (let position = 0; position < wanted.length; position += 1) {
+    const seq = wanted[position];
     if (budget <= 0) {
-      skipped = requested.length - position;
+      skipped = wanted.length - position;
       truncated = true;
       break;
     }
@@ -248,9 +326,15 @@ export function recallSession(session, selections, config) {
       continue;
     }
     const message = typeof session.deriveEventMessage === "function" ? session.deriveEventMessage(event) : null;
-    const body = message !== null
+    let body = message !== null
       ? `[seq ${seq}: ${message.role}]\n${projectMessageText(message)}`
       : `[seq ${seq}: ${event.type}]\n${JSON.stringify(event.data).slice(0, maxRecallTokens * 4)}`;
+    if (message !== null && config.includePairedResults !== false) {
+      for (const paired of collectPairedResults(session, index.events, positionOf, seq, message, requestedSet, pairedChars)) {
+        pairedResults += 1;
+        body += `\n\n${paired.text}`;
+      }
+    }
     const kept = truncateTokens(body, budget, "recall budget");
     budget -= estimateEntryTokens(kept.text);
     if (kept.truncated) truncated = true;
@@ -258,7 +342,13 @@ export function recallSession(session, selections, config) {
     seqs.push(seq);
   }
   if (skipped > 0) {
-    entries.push({ seq: requested[requested.length - skipped], text: `[recall budget exhausted: ${skipped} further requested seq(s) not included]` });
+    entries.push({ seq: wanted[wanted.length - skipped], text: `[recall budget exhausted: ${skipped} further requested seq(s) not included]` });
+  }
+  if (page !== undefined && totalPages > 1) {
+    entries.push({
+      seq: wanted[wanted.length - 1],
+      text: currentPageMarker(page, totalPages, requested.length)
+    });
   }
   return {
     text: entries.map((entry) => entry.text).join("\n\n"),
@@ -268,6 +358,16 @@ export function recallSession(session, selections, config) {
     missing,
     skipped,
     truncated,
+    pairedResults,
+    page: page ?? 1,
+    totalPages,
+    totalRequested: requested.length,
     tokens: entries.reduce((total, entry) => total + estimateEntryTokens(entry.text), 0)
   };
+}
+
+/** One-line page footer, saying where the reader is and how to continue. */
+function currentPageMarker(page, totalPages, total) {
+  const next = page < totalPages ? ` — use page:${page + 1} for the next ${Math.min(RECALL_PAGE_SIZE, Math.max(0, total - page * RECALL_PAGE_SIZE))} entr(y|ies)` : "";
+  return `[page ${page}/${totalPages} of ${total} requested seq(s)${next}]`;
 }

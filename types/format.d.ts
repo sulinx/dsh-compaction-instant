@@ -42,6 +42,10 @@ export interface SearchHeaderSummary {
     shown: number;
     floorDropped?: number;
     truncated?: boolean;
+    /** Events of the turn in progress, left out of the scan. */
+    skippedTurnEvents?: number;
+    /** The turn number that is still open, when one is. */
+    openTurn?: number;
 }
 
 /** One file touched in the session, with the seqs of every operation on it. */

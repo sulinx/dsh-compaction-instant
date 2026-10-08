@@ -35,8 +35,8 @@ next question
 
 | 入口 | 模块 | 作用 |
 |---|---|---|
-| `recall` **工具**（给模型用） | `dsh-compaction-instant/tool` | 按类型恢复原文：`type:"seq"` 配合 `(seq N)`/`(seqs A-B)`/`#N` 标记，`type:"result"` 配合 `result N` 指针，`type:"checkpoint"` 配合 `[checkpoint N]` 序号——把原始内容一字不差地恢复到当前工具结果里 |
-| `search` **工具**（给模型用） | `dsh-compaction-instant/tool` | 在整个持久日志里按关键词、正则或自然语言搜索——包括被压缩掉的内容——返回带 `(seq N)` 指针的匹配事件，可直接交给 `recall` 取回 |
+| `recall` **工具**（给模型用） | `dsh-compaction-instant/tool` | 按类型恢复原文：`type:"seq"` 配合 `(seq N)`/`(seqs A-B)`/`#N` 标记，`type:"result"` 配合 `result N` 指针，`type:"checkpoint"` 配合 `[checkpoint N]` 序号——把原始内容一字不差地恢复到当前工具结果里。宽范围按每页 20 条读取（`page: 2`）；恢复一次工具调用时会一并带回它产生的结果（截断到 4000 字符，并给出取全文的指针） |
+| `search` **工具**（给模型用） | `dsh-compaction-instant/tool` | 在整个持久日志里按关键词、正则或自然语言搜索——包括被压缩掉的内容，但**不含正在进行中的这一轮**——返回带 `(seq N)` 指针的匹配事件，可直接交给 `recall` 取回 |
 | `touched_files` **工具**（给模型用） | `dsh-compaction-instant/tool` | 本会话读过/写过/改过的所有文件，按路径归并并附上每次操作的 seq 指针，每页 5 个 |
 | `/recall` **命令**（给人用） | `dsh-compaction-instant/command` | `/recall <关键词\|正则\|整句话>` 追加一条持久的用户消息，内含匹配事件和 seq 指针，下一轮模型就能看到；`/recall files [页码]` 是同一套逻辑，换成文件视图 |
 | 共享引用空间 | `dsh-compaction-instant/indices` | seq 查找、检查点序号、以及所有打印出来的指针的**唯一**解析定义——打印方（编译器）与解析方（`recall`/`search`）在构造上不会漂移 |
