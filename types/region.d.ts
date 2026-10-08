@@ -10,13 +10,19 @@ import type { TokenMeasurement } from '@deepseek-ai/dsh-token-meter';
 /** Rejects a compiled checkpoint whose replacement boundaries changed. */
 export declare class SurfaceChangedError extends Error {}
 
+/** Rejects a checkpoint that would not reduce the span, after every tighter cap was tried. */
+export declare class CheckpointNotSmallerError extends Error {}
+
 /** Conversation meter and compile hook bound by the engine. */
 export interface RegionDependencies {
     meter: {
         measure(session: Session): TokenMeasurement;
         estimateMessage(message: unknown): number;
     };
-    compile(prepared: PreparedRegion, agent: Agent | undefined, signal: AbortSignal | undefined): Promise<{
+    compile(prepared: PreparedRegion, agent: Agent | undefined, signal: AbortSignal | undefined, options?: {
+        /** Pin the compiler budget to this fraction of the shadowed span. */
+        capFraction?: number;
+    }): Promise<{
         entries: readonly (string | { seq: number; text: string })[];
         provider: string;
         model: string;
@@ -67,7 +73,17 @@ export interface CompactionOptions {
 }
 
 /** Resolve the next head-anchored, tool-pairing-balanced range. */
-export declare function selectCompactableRange(session: Session, measurement: TokenMeasurement, retainTurns: number, retainTokens: number): { start: number; end: number; tail: RetainedTail } | null;
+export declare function selectCompactableRange(session: Session, measurement: TokenMeasurement, retainTurns: number, retainTokens: number): {
+    start: number;
+    end: number;
+    /** Priced tokens of every node the span would shadow. */
+    spanTokens: number;
+    /** Priced tokens of the landed checkpoints among them. */
+    checkpointTokens: number;
+    /** `spanTokens - checkpointTokens`: what the span adds beyond prior checkpoints. */
+    newTokens: number;
+    tail: RetainedTail;
+} | null;
 /** Human-readable account of the retained tail, for the checkpoint footer. */
 export declare function describeTail(tail: RetainedTail | undefined | null): string;
 /** Run the single durable compaction transaction over one positional span. */

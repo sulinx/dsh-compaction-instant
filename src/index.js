@@ -19,7 +19,7 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
 import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
 import { compileNoisePatterns, compileRegion, COMPILER_REV, DEFAULT_ARG_TOOLS, DEFAULT_NOISE_PATTERNS, DEFAULT_SKIP_INJECT_TYPES } from "./compiler.js";
 import { checkpointOrdinals, createEventIndex } from "./indices.js";
-import { assertNoActiveCompaction, compactSurfaceRegion, selectCompactableRange } from "./region.js";
+import { assertNoActiveCompaction, CheckpointNotSmallerError, compactSurfaceRegion, selectCompactableRange } from "./region.js";
 
 // ── configuration resolution ───────────────────────────────────────────────
 
@@ -55,6 +55,22 @@ const DEFAULT_SKIP_PER_TURN_INJECTIONS = true;
  * 11.6% → 19.8% with conversation text untouched at 100%.
  */
 const DEFAULT_RANK_ELISION = true;
+/**
+ * Automatic pressure requires this many **new** tokens in the selected span —
+ * span tokens minus any landed checkpoint it would absorb. A span that is
+ * almost entirely a previous checkpoint re-encodes text that checkpoint already
+ * holds: the surface barely shrinks, pressure stays over the threshold, and the
+ * next step boundary compacts again. Overflow recovery and manual `/compact`
+ * deliberately ignore this floor, because both must be able to force one
+ * reduction (the same rule as upstream pi-vcc's 4096-token gate).
+ */
+const MIN_PRESSURE_NEW_TOKENS = 4096;
+/**
+ * Floor for a span-pinned compiler budget (the shrink-gate retry). Below this
+ * the checkpoint stops being a compaction and the framing alone outweighs it,
+ * so a span that cannot pay for that framing is declined instead.
+ */
+const MIN_COMPILED_CAP = 256;
 /** Backend provenance recorded on the `compaction/summary` event. */
 const COMPILER_PROVIDER = "dsh-compaction-instant";
 const COMPILER_MODEL = "vcc-compiler";
@@ -741,8 +757,11 @@ export class InstantCompactionEngine extends CompactionEngine {
    * @param agent - retained for signature parity; the default compiler never
    *   routes a model call through it.
    * @param signal - optional cancellation checked before the compile.
+   * @param options - optional `capFraction`: pin the compiler budget to that
+   *   fraction of the shadowed span (the shrink-gate retry), instead of the
+   *   configured cap.
    * @returns ordered checkpoint entries plus backend provenance and stats.
-   */  async compile(prepared, agent, signal) {
+   */  async compile(prepared, agent, signal, options = undefined) {
     signal?.throwIfAborted();
     const index = createEventIndex(prepared.session);
     const nodes = prepared.shadowedSeqs.map((seq) => {
@@ -759,10 +778,14 @@ export class InstantCompactionEngine extends CompactionEngine {
     // The same rule (`./indices.js`) resolves that ordinal in `recall`, so the
     // marker printed here and the marker resolved there cannot drift.
     const ordinals = checkpointOrdinals(prepared.session);
-    engineDebug(this.config, `compile span=${prepared.shadowedSeqs.length} seqs=${prepared.shadowedSeqs[0]}-${prepared.shadowedSeqs[prepared.shadowedSeqs.length - 1]} shadowedTokens=${prepared.shadowedTokenCount} cap=${this.effectiveMaxTokens(prepared.shadowedTokenCount)} checkpoints=${ordinals.size} tail=${prepared.tail === undefined ? "unreported" : `${prepared.tail.policy}/kept=${prepared.tail.keptNodes}nodes/${prepared.tail.keptTokens}tok/receded=${prepared.tail.receded === true}`}`);
+    const configuredCap = this.effectiveMaxTokens(prepared.shadowedTokenCount);
+    const capFraction = typeof options?.capFraction === "number" && options.capFraction > 0 && options.capFraction < 1 ? options.capFraction : undefined;
+    const cap = capFraction === undefined ? configuredCap
+      : Math.max(MIN_COMPILED_CAP, Math.min(configuredCap, Math.floor(prepared.shadowedTokenCount * capFraction)));
+    engineDebug(this.config, `compile span=${prepared.shadowedSeqs.length} seqs=${prepared.shadowedSeqs[0]}-${prepared.shadowedSeqs[prepared.shadowedSeqs.length - 1]} shadowedTokens=${prepared.shadowedTokenCount} cap=${cap}${capFraction === undefined ? "" : ` (capFraction=${capFraction})`} checkpoints=${ordinals.size} tail=${prepared.tail === undefined ? "unreported" : `${prepared.tail.policy}/kept=${prepared.tail.keptNodes}nodes/${prepared.tail.keptTokens}tok/receded=${prepared.tail.receded === true}`}`);
     const { entries, stats, capped } = compileRegion(nodes, {
       ...this.config,
-      maxTokens: this.effectiveMaxTokens(prepared.shadowedTokenCount),
+      maxTokens: cap,
       checkpointOrdinals: ordinals,
       // A nested checkpoint carried in from a parent (seeded) session keeps its
       // own numbering; this lets the compiler mark such a block instead of
@@ -840,7 +863,26 @@ export class InstantCompactionEngine extends CompactionEngine {
         /* v8 ignore next -- paired with the defensive post-success branch above. */
         break;
       }
-      result = await this.compactRegion(range.start, range.end, agent, signal, range.tail);
+      if (range.newTokens < MIN_PRESSURE_NEW_TOKENS) {
+        engineDebug(this.config, `pressure skipped: seqs ${range.start}-${range.end} carries ${range.newTokens} new tokens (checkpoint ${range.checkpointTokens}, span ${range.spanTokens}, floor ${MIN_PRESSURE_NEW_TOKENS})`);
+        if (result === null) return null;
+        break;
+      }
+      try {
+        result = await this.compactRegion(range.start, range.end, agent, signal, range.tail);
+      } catch (error) {
+        // A span that cannot pay for the checkpoint framing (every tighter cap
+        // was tried) is declined, not retried and not reported as a failure:
+        // nothing about the surface changed, and the next step boundary simply
+        // measures again. This is the automatic path only — a manual `/compact`
+        // still surfaces the reason.
+        if (error instanceof CheckpointNotSmallerError) {
+          engineDebug(this.config, `pressure declined seqs ${range.start}-${range.end}: ${error.message}`);
+          if (result === null) return null;
+          break;
+        }
+        throw error;
+      }
       measurement = meter.measure(agent.session);
       if (pressureOf(measurement) < spec.thresholdTokens) return result;
     }

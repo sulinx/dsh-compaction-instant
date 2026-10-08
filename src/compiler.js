@@ -357,7 +357,18 @@ export const DEFAULT_ARG_TOOLS = Object.freeze([
   "subagent",
   "subagent_fork",
   "ralph",
-  "workflow"
+  "workflow",
+  // Coordination / job tools: each declares a key field in
+  // {@link DEFAULT_TOOL_KEY_FIELDS} (`objective`, `agent_id`, `job_id`,
+  // `message`), but they were missing from this whitelist — so the declared
+  // mapping could never render and the row fell back to name-only (upstream
+  // pi-vcc found the same six-tool mismatch in its own table).
+  "create_goal",
+  "update_goal",
+  "interrupt_agent",
+  "job_kill",
+  "job_output",
+  "send_message"
 ]);
 
 /**
@@ -539,6 +550,47 @@ function seqRef(seq) {
 }
 
 /**
+ * Sentinel prefix of the recall guide line, used to strip absorbed copies.
+ * Matched by prefix rather than by full equality so guides written by older
+ * revisions of this engine are removed too.
+ */
+const RECALL_GUIDE_SENTINEL = "RECALL: append-only log";
+
+/**
+ * Strip this engine's own checkpoint envelope from an absorbed checkpoint,
+ * returning its inner body.
+ *
+ * A checkpoint replacement is itself a message on the surface, so the next
+ * compaction over it absorbs it. Re-emitting the whole text nests one more
+ * copy of the preamble, both tags and the recall guide per generation, and
+ * every nested copy is charged to the new checkpoint's budget while telling
+ * the model nothing new. Measured on this machine before the fix: a session
+ * with three landed checkpoints carried the guide three times and the
+ * preamble four times.
+ *
+ * The body (intro line, header line, compiled entries, retention footer) is
+ * kept byte-exact: only the framing that is regenerated on every checkpoint
+ * is removed. Framing that is not ours (another backend's tags, or plain text)
+ * is returned as the plain projection — foreign content is never rewritten,
+ * only passed through with {@link sanitize}.
+ * @param text - raw checkpoint text as projected from the durable message.
+ * @returns the inner body, or the sanitized original when the frame is foreign.
+ */
+export function unframeCheckpointText(text) {
+  const clean = sanitize(typeof text === "string" ? text : "");
+  if (clean.length === 0) return "";
+  if (!clean.includes(CHECKPOINT_OPEN_TAG) && !clean.includes(CHECKPOINT_PREAMBLE)) return clean;
+  let out = clean;
+  if (out.startsWith(CHECKPOINT_PREAMBLE)) out = out.slice(CHECKPOINT_PREAMBLE.length);
+  out = out.replaceAll(CHECKPOINT_OPEN_TAG, "").replaceAll(CHECKPOINT_CLOSE_TAG, "");
+  out = out
+    .split("\n")
+    .filter((line) => !line.startsWith(RECALL_GUIDE_SENTINEL))
+    .join("\n");
+  return out.trim();
+}
+
+/**
  * Advisory prepended to a nested checkpoint whose pointers do not resolve in
  * THIS session's log.
  *
@@ -659,6 +711,7 @@ export function compileNodes(nodes, config, budgets) {
     injectedSkippedTokens: 0,
     injectedByKey: {},
     foreignCheckpoints: 0,
+    unframedCheckpoints: 0,
     collapsedRows: 0
   };
   // Pre-pass over the ordered nodes: map each tool-call id to the seq of its
@@ -830,11 +883,17 @@ export function compileNodes(nodes, config, budgets) {
           // The checkpoint node is a user/message in the durable protocol
           // (surface replacement only allows message nodes), but it is
           // harness-generated framing — display it as [system].
+          //
+          // Absorb its INNER BODY: re-emitting the whole text would nest one
+          // more preamble, tag pair and recall guide per generation, charging
+          // the new checkpoint for framing the model already has.
+          const body = unframeCheckpointText(text);
           const header = roleHeader("system", node.seq);
-          const foreign = isForeignCheckpointText(text, config.seqTypeOf);
+          const foreign = isForeignCheckpointText(body, config.seqTypeOf);
           if (foreign) stats.foreignCheckpoints += 1;
-          pushEntry(node.seq, header + (foreign ? `${FOREIGN_SEQ_NOTE}\n${text}` : text), "checkpoint");
-          debugLog(config, "checkpoint", `seq=${node.seq} chars=${text.length} foreign=${foreign}`);
+          if (body !== text) stats.unframedCheckpoints += 1;
+          pushEntry(node.seq, header + (foreign ? `${FOREIGN_SEQ_NOTE}\n${body}` : body), "checkpoint");
+          debugLog(config, "checkpoint", `seq=${node.seq} chars=${text.length} bodyChars=${body.length} foreign=${foreign}`);
         }
         continue;
       }

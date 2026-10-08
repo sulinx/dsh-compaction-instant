@@ -19,7 +19,7 @@ import { CompactionId, ManualCompactionError, compactCheckpointSource, toolPairi
 import { createUserMessage, errorChain } from "@deepseek-ai/dsh-llm";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { frameCheckpoint, joinCompiledEntries } from "./compiler.js";
+import { frameCheckpoint, isCheckpointSource, joinCompiledEntries } from "./compiler.js";
 import { sessionEvents } from "./indices.js";
 
 /**
@@ -28,6 +28,23 @@ import { sessionEvents } from "./indices.js";
  * so a manual caller can report the two causes differently.
  */
 export class SurfaceChangedError extends Error {}
+
+/**
+ * Rejects a compiled checkpoint that would not reduce the surface it replaces,
+ * after every tighter cap has been tried. Distinguished from compile failures
+ * so the automatic path can decline the span (nothing worth compacting) while a
+ * manual `/compact` still reports it.
+ */
+export class CheckpointNotSmallerError extends Error {}
+
+/**
+ * Cap fractions of the shadowed span tried when the shrink gate rejects the
+ * checkpoint, in order: `undefined` keeps the configured cap, then the span's
+ * own half, then a third — below that the framing alone costs more than the
+ * span can pay for. Upstream pi-vcc retries at a tighter cap for the same
+ * reason ("the shrink gate retries at a tighter cap before it gives up").
+ */
+const SHRINK_RETRY_SPAN_FRACTIONS = Object.freeze([undefined, 0.5, 0.3]);
 
 /**
  * Turn index of every surface node, read from the log's `turn/start` events.
@@ -146,13 +163,32 @@ export function selectCompactableRange(session, measurement, retainTurns, retain
   if (keepFromIdx === 0) return null;
   // 0.1.5 host protects the surface head (node 0) when it is a system/message
   // (assertSystemHeadRewrite): a compaction replace may never shadow it.
-  const headEvent = sessionEvents(session).find((event) => event.seq === surfaceNodes[0]);
+  const events = sessionEvents(session);
+  const headEvent = events.find((event) => event.seq === surfaceNodes[0]);
   const headSkip = headEvent?.type === "system/message" ? 1 : 0;
   if (keepFromIdx - headSkip <= 0) return null;
   const retainedNodes = pricedNodes.slice(keepFromIdx);
+  // Price the span by what it contributes BEYOND any landed checkpoint it would
+  // absorb. A span that is almost entirely a previous checkpoint re-encodes
+  // text that checkpoint already holds: the surface barely shrinks, pressure
+  // stays over the threshold, and the next step boundary compacts again. The
+  // caller uses `newTokens` to refuse that trade (upstream pi-vcc requires
+  // 4096 new tokens before automatic pressure fires).
+  const eventBySeq = new Map(events.map((event) => [event.seq, event]));
+  let spanTokens = 0;
+  let checkpointTokens = 0;
+  for (let index = headSkip; index < keepFromIdx; index += 1) {
+    const priced = pricedNodes[index];
+    spanTokens += priced.tokens;
+    const event = eventBySeq.get(priced.seq);
+    if (event?.type === "user/message" && isCheckpointSource(event.data?.source)) checkpointTokens += priced.tokens;
+  }
   return {
     start: surfaceNodes[headSkip],
     end: surfaceNodes[keepFromIdx - 1],
+    spanTokens,
+    checkpointTokens,
+    newTokens: spanTokens - checkpointTokens,
     tail: {
       policy,
       keptNodes: retainedNodes.length,
@@ -351,41 +387,52 @@ export function prepareCompaction(dependencies, session, selection) {
  * @returns the compiled summary, provenance, and framed checkpoint message.
  */
 async function compileCompaction(dependencies, prepared, agent, compactionId, sourceCommandId, signal) {
-  const compiled = await dependencies.compile(prepared, agent, signal);
   // The UI-facing summary IS the compiled body: the checkpoint row expands to
   // exactly the entries the model sees. The body is joined with separators
   // and wrapped in an adaptive Markdown fence, so the UI renders the whole
   // expansion as one tidy code block even when messages contain markdown.
   const verb = sourceCommandId === undefined ? "自动压缩" : "手动 /compact";
-  const introLine = `${verb}: 将 ${prepared.shadowedSeqs.length} 个节点 / ~${prepared.shadowedTokenCount} tokens 编译为 ${compiled.entries.length} 条目 / ~${compiled.stats.tokens} tokens`;
-  const headerLine = `## Compiled checkpoint: ${prepared.shadowedSeqs.length} nodes (seqs ${prepared.start}-${prepared.end}, ~${prepared.shadowedTokenCount} tokens) — ${compiled.entries.length} entries, ~${compiled.stats.tokens} tokens compiled`;
-  // Verbatim retention footer: nodes after the compiled span were never
-  // compiled, so they stay in the live surface as original text.
-  const retainedNodes = prepared.measurement.nodes.slice(prepared.endIdx + 1);
-  const retainedTokenCount = retainedNodes.reduce((total, node) => total + node.tokens, 0);
-  const footerLine = retainedNodes.length === 0 ? undefined
-    : `尾部原文保留: ${retainedNodes.length} 节点 / ~${retainedTokenCount} tokens（${describeTail(prepared.tail)}）`;
-  const bodyEntries = [
-    introLine,
-    headerLine,
-    ...compiled.entries,
-    ...(footerLine === undefined ? [] : [footerLine])
-  ];
-  const summary = [{ type: "text", text: fenceCode(joinCompiledEntries(bodyEntries)) }];
-  const checkpointMessage = createUserMessage({
-    content: frameCheckpoint(compiled.entries, headerLine, introLine, footerLine),
-    source: compactCheckpointSource(compactionId, sourceCommandId)
-  });
-  const framedTokenCount = dependencies.meter.estimateMessage(checkpointMessage);
-  if (framedTokenCount >= prepared.shadowedTokenCount) throw new Error(`compiled checkpoint is not smaller than the shadowed content (${framedTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`);
-  return {
-    ...prepared,
-    summary,
-    provider: compiled.provider,
-    model: compiled.model,
-    checkpointMessage,
-    framedTokenCount
-  };
+  let framedTokenCount = 0;
+  let previousFramed;
+  for (let attempt = 0; attempt < SHRINK_RETRY_SPAN_FRACTIONS.length; attempt += 1) {
+    const spanFraction = SHRINK_RETRY_SPAN_FRACTIONS[attempt];
+    const compiled = await dependencies.compile(prepared, agent, signal, spanFraction === undefined ? undefined : { capFraction: spanFraction });
+    const introLine = `${verb}: 将 ${prepared.shadowedSeqs.length} 个节点 / ~${prepared.shadowedTokenCount} tokens 编译为 ${compiled.entries.length} 条目 / ~${compiled.stats.tokens} tokens`;
+    const headerLine = `## Compiled checkpoint: ${prepared.shadowedSeqs.length} nodes (seqs ${prepared.start}-${prepared.end}, ~${prepared.shadowedTokenCount} tokens) — ${compiled.entries.length} entries, ~${compiled.stats.tokens} tokens compiled`;
+    // Verbatim retention footer: nodes after the compiled span were never
+    // compiled, so they stay in the live surface as original text.
+    const retainedNodes = prepared.measurement.nodes.slice(prepared.endIdx + 1);
+    const retainedTokenCount = retainedNodes.reduce((total, node) => total + node.tokens, 0);
+    const footerLine = retainedNodes.length === 0 ? undefined
+      : `尾部原文保留: ${retainedNodes.length} 节点 / ~${retainedTokenCount} tokens（${describeTail(prepared.tail)}）`;
+    const bodyEntries = [
+      introLine,
+      headerLine,
+      ...compiled.entries,
+      ...(footerLine === undefined ? [] : [footerLine])
+    ];
+    const summary = [{ type: "text", text: fenceCode(joinCompiledEntries(bodyEntries)) }];
+    const checkpointMessage = createUserMessage({
+      content: frameCheckpoint(compiled.entries, headerLine, introLine, footerLine),
+      source: compactCheckpointSource(compactionId, sourceCommandId)
+    });
+    framedTokenCount = dependencies.meter.estimateMessage(checkpointMessage);
+    if (framedTokenCount < prepared.shadowedTokenCount) {
+      return {
+        ...prepared,
+        summary,
+        provider: compiled.provider,
+        model: compiled.model,
+        checkpointMessage,
+        framedTokenCount
+      };
+    }
+    // A tighter cap that changed nothing (a compile hook that ignores
+    // `capFraction`) cannot be helped by retrying it.
+    if (previousFramed !== undefined && framedTokenCount >= previousFramed) break;
+    previousFramed = framedTokenCount;
+  }
+  throw new CheckpointNotSmallerError(`compiled checkpoint is not smaller than the shadowed content (${framedTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`);
 }
 
 /**

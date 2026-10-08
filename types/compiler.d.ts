@@ -63,6 +63,8 @@ export interface CompileStats {
     reasoningElided: number;
     noiseElided: number;
     checkpoints: number;
+    /** Absorbed checkpoints whose own framing (preamble/tags/recall guide) was stripped. */
+    unframedCheckpoints: number;
     tokens: number;
     /** Low-value rows (tool/result/media/note) dropped by the first elision pass. */
     elidedToolRows: number;
@@ -100,6 +102,12 @@ export declare function pickToolKeyArg(name: string, input: unknown, keyFields: 
 export declare function parseToolArguments(argumentsRaw: string): unknown;
 export declare function projectToolResultText(blocks: readonly unknown[]): string;
 export declare function isCheckpointSource(source: unknown): boolean;
+/**
+ * Strip this engine's own checkpoint framing (preamble, tags, recall guide)
+ * from an absorbed checkpoint, returning its inner body; foreign framing is
+ * returned unchanged.
+ */
+export declare function unframeCheckpointText(text: unknown): string;
 /** Canonical `<kind>:<name>` identity of one message source (upstream `customType` analogue). */
 export declare function injectKeyOf(source: unknown): string;
 /** Short display label for one injection key, used by the omission marker. */

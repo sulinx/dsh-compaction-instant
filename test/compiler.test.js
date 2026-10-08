@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseSeqSpec } from "../src/recall.js";
 import {
+  DEFAULT_ARG_TOOLS,
   DEFAULT_NOISE_PATTERNS,
+  DEFAULT_TOOL_KEY_FIELDS,
   compileNoisePatterns,
   compileNodes,
   compileRegion,
@@ -25,7 +27,8 @@ import {
   sanitize,
   stripNoiseXml,
   tokenize,
-  truncateTokens
+  truncateTokens,
+  unframeCheckpointText
 } from "../src/compiler.js";
 
 const CONFIG = {
@@ -252,8 +255,51 @@ test("compileNodes copies prior checkpoints verbatim", () => {
   assert.match(entries[1].text, /^\[user\]\nnew work/);
 });
 
-test("compileNodes labels images and documents", () => {
+test("every default tool key field is whitelisted to render", () => {
+  const whitelist = new Set(DEFAULT_ARG_TOOLS);
+  const unreachable = Object.keys(DEFAULT_TOOL_KEY_FIELDS).filter((name) => !whitelist.has(name));
+  assert.deepEqual(unreachable, [], "a declared key field that is not whitelisted can never render");
+});
+
+test("unframeCheckpointText strips this engine's framing and keeps the body", () => {
+  const body = joinCompiledEntries(["## Compiled checkpoint: 3 nodes (seqs 1-3) — 2 entries", "[user] (seq 1)\nhello", "[assistant] (seq 2)\ndone"]);
+  const framed = frameCheckpoint(["[user] (seq 1)\nhello"], "## Compiled checkpoint: 3 nodes (seqs 1-3)", "自动压缩: 3 个节点").map((block) => block.text).join("\n\n");
+  assert.ok(framed.includes("<compacted-checkpoint>"), "fixture must be framed");
+  const unframed = unframeCheckpointText(framed);
+  assert.ok(!unframed.includes("<compacted-checkpoint>"), "tags are stripped");
+  assert.ok(!unframed.includes("</compacted-checkpoint>"), "closing tag is stripped");
+  assert.ok(!unframed.includes("RECALL: append-only log"), "the recall guide is stripped");
+  assert.ok(!unframed.includes("automatically generated checkpoint"), "the preamble is stripped");
+  assert.match(unframed, /## Compiled checkpoint: 3 nodes/, "the body survives");
+  assert.equal(unframeCheckpointText(body), body, "unframed text is already a body");
+});
+
+test("unframeCheckpointText passes foreign framing through", () => {
+  const foreign = "<another-backend>\n[user] (seq 1)\nhello\n</another-backend>";
+  assert.equal(unframeCheckpointText(foreign), foreign);
+  assert.equal(unframeCheckpointText("plain text"), "plain text");
+  assert.equal(unframeCheckpointText(undefined), "");
+});
+
+test("compileNodes absorbs a framed checkpoint without nesting its framing", () => {
+  const framed = frameCheckpoint(["[user] (seq 1)\nhello"], "## Compiled checkpoint: 2 nodes (seqs 1-2)").map((block) => block.text).join("\n\n");
   const nodes = [
+    { seq: 1, message: { role: "user", content: [{ type: "text", text: framed }], source: { kind: "plugin", plugin: "compact", compactionId: "x" } } },
+    { seq: 2, message: { role: "user", content: [{ type: "text", text: "new work" }], source: { kind: "user" } } }
+  ];
+  const { entries, stats } = compileNodes(nodes, CONFIG);
+  assert.equal(stats.checkpoints, 1);
+  assert.equal(stats.unframedCheckpoints, 1);
+  const absorbed = entries[0].text;
+  assert.ok(!absorbed.includes("<compacted-checkpoint>"), "no nested envelope");
+  assert.ok(!absorbed.includes("RECALL: append-only log"), "no nested recall guide");
+  assert.match(absorbed, /## Compiled checkpoint: 2 nodes/, "the prior header survives as provenance");
+  // Re-compiling the result must not add framing either: the body stays stable.
+  const again = compileNodes([{ seq: 3, message: { role: "user", content: [{ type: "text", text: absorbed.replace(/^\[system\]\n/, "") }], source: { kind: "plugin", plugin: "compact" } } }], CONFIG);
+  assert.ok(!again.entries[0].text.includes("RECALL: append-only log"));
+});
+
+test("compileNodes labels images and documents", () => {  const nodes = [
     { seq: 1, message: { role: "user", content: [{ type: "image", attachment: { id: "i1" } }], source: { kind: "user" } } },
     { seq: 2, message: { role: "assistant", content: [{ type: "document", attachment: { id: "d1" } }] } }
   ];

@@ -14,6 +14,7 @@ import { InstantCompactionEngine, resolveCompactSpec, resolveConfig, resolveTarg
 
 const user = (text) => createUserMessage({ content: [{ type: "text", text }], source: { kind: "user" } });
 const assistant = (text) => createAssistantMessage({ content: [{ type: "text", text }], source: { provider: "p", model: "m" } });
+const checkpoint = (text) => createUserMessage({ content: [{ type: "text", text }], source: { kind: "compact-checkpoint" } });
 
 /**
  * Two closed turns, so the first one is compactable.
@@ -69,7 +70,7 @@ test("the pressure trigger reads surface tokens, not the provider-usage total", 
 test("pressure still fires when the shrinkable surface itself is over the threshold", async () => {
   const session = makeSession();
   const calls = [];
-  const measurement = { value: { nodes: prices(session, 200), surfaceTokens: 800, totalTokens: 90000 } };
+  const measurement = { value: { nodes: prices(session, 3000), surfaceTokens: 6000, totalTokens: 90000 } };
   const engine = makeEngine(session, measurement, calls, { compactionRetries: 0 });
   const result = await engine.compactIfNeeded({ session }, "pressure", undefined);
   assert.equal(calls.length, 1);
@@ -82,7 +83,7 @@ test("a landed compaction is returned when pressure stays above the threshold", 
   // The stub never reprices the surface, so every retry stays over the
   // threshold: the loop must return the checkpoint it wrote, not throw
   // (the old throw surfaced as "step compaction failed" for a durable write).
-  const measurement = { value: { nodes: prices(session, 200), surfaceTokens: 800, totalTokens: 90000 } };
+  const measurement = { value: { nodes: prices(session, 3000), surfaceTokens: 6000, totalTokens: 90000 } };
   const engine = makeEngine(session, measurement, calls);
   const result = await engine.compactIfNeeded({ session }, "pressure", undefined);
   assert.equal(calls.length, 2); // 1 initial attempt + compactionRetries (1)
@@ -92,7 +93,55 @@ test("a landed compaction is returned when pressure stays above the threshold", 
 test("hosts without surface pricing keep the previous reading", async () => {
   const session = makeSession();
   const calls = [];
-  const measurement = { value: { nodes: prices(session, 25), totalTokens: 90000 } };
+  const measurement = { value: { nodes: prices(session, 3000), totalTokens: 90000 } };
+  const engine = makeEngine(session, measurement, calls, { compactionRetries: 0 });
+  const result = await engine.compactIfNeeded({ session }, "pressure", undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(result?.checkpoint, true);
+});
+
+test("pressure refuses a span that would only re-encode a landed checkpoint", async () => {
+  // Two closed turns where the only compactable span is turn 1 = [an early
+  // user message, a landed checkpoint]. The checkpoint is priced as the bulk of
+  // the span, so the span carries almost no NEW tokens: compacting it would
+  // re-encode what the checkpoint already holds, shrink the surface by nearly
+  // nothing, and fire again at the next step boundary.
+  const session = Session.create("pressure-checkpoint-session", [
+    { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+    { type: "user/message", seq: 1, time: 2, data: user("early question"), surfaceOp: "append" },
+    { type: "user/message", seq: 2, time: 3, data: checkpoint("## Compiled checkpoint: 40 nodes"), surfaceOp: "append" },
+    { type: "turn/end", seq: 3, time: 4, data: { turn: 1 } },
+    { type: "turn/start", seq: 4, time: 5, data: { turn: 2 } },
+    { type: "user/message", seq: 5, time: 6, data: user("later question"), surfaceOp: "append" },
+    { type: "assistant/message", seq: 6, time: 7, data: { message: assistant("later answer"), turn: 2, step: 1, stream: [] }, surfaceOp: "append" },
+    { type: "turn/end", seq: 7, time: 8, data: { turn: 2 } }
+  ]);
+  Object.defineProperty(session, "requestHeader", { value: () => ({ config: { provider: "p", model: "m" } }), configurable: true });
+  const prices = session.surface.nodes.map((seq) => ({ seq, tokens: seq === 2 ? 8000 : 10 }));
+  const surfaceTokens = prices.reduce((total, node) => total + node.tokens, 0);
+  const calls = [];
+  const measurement = { value: { nodes: prices, surfaceTokens, totalTokens: surfaceTokens } };
+  const engine = makeEngine(session, measurement, calls, { compactionRetries: 0 });
+  assert.equal(await engine.compactIfNeeded({ session }, "pressure", undefined), null);
+  assert.equal(calls.length, 0);
+});
+
+test("pressure still fires when the span carries enough new tokens beside the checkpoint", async () => {
+  const session = Session.create("pressure-checkpoint-session-2", [
+    { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+    { type: "user/message", seq: 1, time: 2, data: user("early question"), surfaceOp: "append" },
+    { type: "user/message", seq: 2, time: 3, data: checkpoint("## Compiled checkpoint: 2 nodes"), surfaceOp: "append" },
+    { type: "turn/end", seq: 3, time: 4, data: { turn: 1 } },
+    { type: "turn/start", seq: 4, time: 5, data: { turn: 2 } },
+    { type: "user/message", seq: 5, time: 6, data: user("later question"), surfaceOp: "append" },
+    { type: "assistant/message", seq: 6, time: 7, data: { message: assistant("later answer"), turn: 2, step: 1, stream: [] }, surfaceOp: "append" },
+    { type: "turn/end", seq: 7, time: 8, data: { turn: 2 } }
+  ]);
+  Object.defineProperty(session, "requestHeader", { value: () => ({ config: { provider: "p", model: "m" } }), configurable: true });
+  const prices = session.surface.nodes.map((seq) => ({ seq, tokens: seq === 2 ? 100 : 5000 }));
+  const surfaceTokens = prices.reduce((total, node) => total + node.tokens, 0);
+  const calls = [];
+  const measurement = { value: { nodes: prices, surfaceTokens, totalTokens: surfaceTokens } };
   const engine = makeEngine(session, measurement, calls, { compactionRetries: 0 });
   const result = await engine.compactIfNeeded({ session }, "pressure", undefined);
   assert.equal(calls.length, 1);
