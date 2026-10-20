@@ -20,12 +20,12 @@ Upstream was archived on 2026-09-02, so these fixes are maintained here.
 | `src/region.js` | `0F5543FB26433AEE` (was `4D9318B2DB6AB0E5` before P4c, `BBD0EEE8E8CD4988` before P4b, `6F843C543DA9166A` before P2b) |
 | `src/index.js` | `EC7F232AD0A85A3A` (was `1B443A2976D7A83B` before P8, `4BDC82DDB6EC5D6C` before P4c, `8370859F661310C3` before P4b, `0C4B7B964A40A690` before P4a) |
 | `src/recall.js` | `376817D429B1A9A5` (was `5AB801947A2D52D5` before P8, `ABE901B9914A8A3C` before P5c, `41696141C6052B9E` before the P2b reference space, `149567516934D9F4` before the P1 port) |
-| `src/search.js` | `B851F39D9CC15011` (was `53A6DDA5AFDD4B62` before P8, `4174CA63AB2B047F` before P5b, `6663A321F8101DD4` before P5a, `83CAC25D83CA7A34` before P3) |
+| `src/search.js` | `C40F2F42414C7CC1` (was `53A6DDA5AFDD4B62` before P8, `4174CA63AB2B047F` before P5b, `6663A321F8101DD4` before P5a, `83CAC25D83CA7A34` before P3) |
 | `src/format.js` | `7E7B6A54A70579BF` (was `4B7B2CC78BF8F277` before P8, `8F3B416165CC24EE` before P5b, new in P1) |
 | `src/compiler.js` | `6845679530BAA88F` (was `ECA9B986D502992A` before P8, `C86BB3361FA261B7` before P4c, `1761DA2A2BA36C9F` before P4b, `C5E9669636AEB400` before P2b/P3) |
 | `src/tracked.js` | `8CA655174E124083` (new in P8) |
 | `src/rank.js` | `46A83369C05B2342` (new in P3) |
-| `src/indices.js` | `3E424B8996EC658F` (new in P2b) |
+| `src/indices.js` | `F2860ED2BC156491` (was `3E424B8996EC658F` before the P8d follow-up; new in P2b) |
 | `src/tool.js` | `8F834C367C47D4B9` (was `D660C4338F1A9C9C` before P5c, `172F89B496041B4C` after P0) |
 | `src/command.js` | `EBB2945092E7421D` (was `7177D4ABE27DF971` after P2b, `F07169D9940A776B` after P0) |
 | `src/client.js` | `B381A4E221DEE2F5` (was `8E6D703258F13017` before P4a, `4AD3ACBAA3202950` before the P2b/P3 card fields) |
@@ -186,7 +186,16 @@ Pi-host-specific (0.8.1 `system` entries, 0.8.2 heredoc commit subjects / npm `f
 | P8 | `src/search.js`, `src/format.js` | `core/recall-run.ts` "next-step lines" (0.10.0) | After a search with hits, print a ready-made call: `recall type:"seq" id:"<n-3>-<n+3>"` around the first hit (this engine's typed arguments, not upstream's `range:[…]`). |
 | P8 | `src/recall.js`, `src/search.js`, `src/format.js` | `core/recall-request.ts` forgiving arguments (0.10.0) + off-path fallback | ① `parseSeqSpec` repairs `3..7` / `3 to 7` / `[7, 3]` / reversed `7-3` (a selection is a set); `ALL` stays an error because this engine has no scope concept. ② The **inverse** of upstream's default: this engine searches the whole append-only log on purpose, so a hit that a rewind/message edit has removed from the surface is **labelled** in the header (`N hit(s) not in the current context … still recallable`) rather than hidden behind a lineage default. |
 
-**Verification**: `node --test` = **251 tests / 220 pass / 31 fail**, and the 31 failures are the same
+**P8d follow-up (2026-10-20, after live testing)**: the off-surface label first shipped
+ungated, so a real `search` on a live session reported *6 hit(s) not in the current context*
+for events (`tool/call`, `session/title`, `agent/inbox/spliced`) that never occupy a surface
+node at all. The label now requires the hit's event type to be in
+`SURFACE_EVENT_TYPES` (`src/indices.js`, mirroring the host's own list); log-only events are
+silent. Fingerprints moved to `search.js C40F2F42414C7CC1` / `indices.js F2860ED2BC156491`,
+and `test/surface-types.test.js` pins the list so a host change fails the test first.
+**Requires a harness restart** (a `file:` dependency), unlike the preset rows.
+
+**Verification**: `node --test` = **253 tests / 222 pass / 31 fail**, and the 31 failures are the same
 names as before P8 (old fixtures rejected by the host's settlement-field validation) — diffed by test
 name, zero new failures. `npm run check` (11 × `node --check`) clean. Loading probe: the whole package
 copied into `<tree>\node_modules\_probe_compaction_instant` resolved and imported, `Config` exported, a
