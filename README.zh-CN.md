@@ -100,6 +100,7 @@ Recall 能取回**一切**：文本、推理过程、工具调用的完整参数
 | `hideTools` | `todo_write` | 完全从检查点里去掉的内部管理工具。只有最新一份待办列表为真，更早的写入都是被取代的噪音；显式列表会替换这个默认值 |
 | `skipPerTurnInjections` | `true` | 不把宿主**每轮重新注入**的内容编进检查点：运行上下文/记忆快照（0.1.7 是 `runtime-context:snapshot`，≤0.1.6 是 `plugin:@deepseek-ai/dsh-system-prompt`，两种写法都认）、技能目录（`skill-catalog:catalog`）与 0.2 的重复调用提醒（`repeat-tool-reminder:-`）。它们每次请求都原样重发，且 append-only 日志里每份都还在（`recall`/`search` 可取回），编进检查点纯属占用预算。被跳过的节点在检查点里留**一行**汇总标记（`[N per-turn injection event(s) omitted: …]`）。**只影响编译视图**：区间选择、token 计价、保留尾部都不变，因此 `[checkpoint N]`/`(seq N)` 指针与保留回合数不受影响 |
 | `skipInjectTypes` | 见 compiler | 自定义要跳过的注入来源，键是 `<kind>:<name>`（`{kind:'plugin',plugin:'x'}` → `plugin:x`；`{kind:'skill-catalog',form:'catalog'}` → `skill-catalog:catalog`）。**空数组 = 没设置**（回退默认表）；要"什么都不跳"请用 `skipPerTurnInjections: false` |
+| `trackCommands` | `[]` | 要跨压缩记住的命令名，如 `["ssh", "docker"]`，也支持前缀如 `"gh pr"`。每条取"到下一个**未加引号**的 shell 分隔符（`;`/`&`/`\|`/换行）为止"的原文；`sudo`/`env`/`VAR=` 前缀会被看穿但保留在条目里，`ssh host '<命令>'` 里的远端命令也会被扫。每个命令保留**最近使用**的 10 条，其余以 `(+N earlier)` 前缀折叠。扫描的工具：`pwsh`、`bash`、`shell`、`ssh_exec`、`ssh_batch`。存在的理由：有些会话里"跑过什么命令"本身就是记录——纯运维会话不编辑文件、不提交，一旦工具行被省略就什么都不剩。移植自 pi-vcc 0.9.0 |
 | `modelPolicies` | — | 按 provider/model 单独覆盖 `thresholdRatio`/`compactAtTokens`/`retainTurns`/`retainTokens` |
 | `compactionRetries` / `maxOverflowRetries` | `1` / `1` | 重试次数，含义和官方引擎一样 |
 | `summarizationProvider` / `summarizationModel` | — | 仅为兼容官方配置而接受；**不起作用**——本引擎从不调用模型 |

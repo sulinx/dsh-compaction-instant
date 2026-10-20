@@ -46,6 +46,10 @@
       "types": "./types/command.d.ts",
       "default": "./src/command.js"
     },
+    "./tracked": {
+      "types": "./types/tracked.d.ts",
+      "default": "./src/tracked.js"
+    },
     "./package.json": "./package.json",
     "./client": {
       "default": "./src/client.js"
@@ -61,7 +65,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/indices.js && node --check src/rank.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/format.js && node --check src/tool.js && node --check src/command.js && node --check src/client.js"
+    "check": "node --check src/index.js && node --check src/compiler.js && node --check src/indices.js && node --check src/rank.js && node --check src/region.js && node --check src/recall.js && node --check src/search.js && node --check src/format.js && node --check src/tool.js && node --check src/command.js && node --check src/tracked.js && node --check src/client.js"
   },
   "engines": {
     "node": ">=18"

@@ -74,17 +74,20 @@ export function parseSeqSpec(input) {
       continue;
     }
     const body = parsed.head ?? parsed.body;
-    const match = /^(\d+)(?:\s*-\s*(\d+))?$/u.exec(body);
+    // Forgiving forms whose meaning is certain (pi-vcc v0.10.2 repairs the same
+    // set): `3..7` / `3 to 7` written instead of `3-7`, and a reversed range
+    // (`20-10`) — a selection is a set, so the order of its endpoints carries no
+    // meaning. A form whose intent is NOT certain (`ALL`) is still an error,
+    // because this engine has no scope concept to redirect it to.
+    const match = /^(\d+)(?:\s*(?:-|\.\.|to)\s*(\d+))?$/iu.exec(body.replace(/^\[|\]$/gu, "").trim());
     if (match === null) {
       errors.push(`invalid seq selection "${trimmed}"`);
       continue;
     }
-    const start = Number(match[1]);
-    const end = match[2] === undefined ? start : Number(match[2]);
-    if (end < start) {
-      errors.push(`invalid seq range "${trimmed}" (end before start)`);
-      continue;
-    }
+    const first = Number(match[1]);
+    const second = match[2] === undefined ? first : Number(match[2]);
+    const start = Math.min(first, second);
+    const end = Math.max(first, second);
     selections.push({ start, end });
   }
   const total = selections.reduce((sum, selection) => sum + (selection.end - selection.start + 1), 0);

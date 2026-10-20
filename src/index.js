@@ -103,6 +103,7 @@ const COMPILER_CONFIG_KEYS = [
   "hideTools",
   "skipPerTurnInjections",
   "skipInjectTypes",
+  "trackCommands",
   "rankElision",
   "debug",
   "debugLogPath"
@@ -233,6 +234,8 @@ export function resolveConfig(rawConfig = {}) {
     hideTools: resolveToolNameList(config.hideTools, DEFAULT_HIDE_TOOLS, "hideTools"),
     skipPerTurnInjections: config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS,
     skipInjectTypes: resolveSkipInjectTypes(config.skipInjectTypes, config.skipPerTurnInjections ?? DEFAULT_SKIP_PER_TURN_INJECTIONS),
+    // Blank names would match every command; duplicates would repeat lines.
+    trackCommands: [...new Set(resolveToolNameList(config.trackCommands, [], "trackCommands").map((name) => name.trim()).filter(Boolean))],
     rankElision: config.rankElision ?? DEFAULT_RANK_ELISION,
     debug,
     debugLogPath,
@@ -354,7 +357,7 @@ function validatePolicy(config, name) {
   if (config.noisePatterns !== undefined) {
     if (!Array.isArray(config.noisePatterns) || config.noisePatterns.some((pattern) => typeof pattern !== "string")) throw new Error(`${name}.noisePatterns must be an array of strings`);
   }
-  for (const key of ["toolArgTools", "hideTools", "skipInjectTypes"]) {
+  for (const key of ["toolArgTools", "hideTools", "skipInjectTypes", "trackCommands"]) {
     if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some((entry) => typeof entry !== "string" || entry.length === 0))) {
       throw new Error(`${name}.${key} must be an array of non-empty strings`);
     }
@@ -562,6 +565,7 @@ export class InstantCompactionEngine extends CompactionEngine {
     hideTools: z.array(z.string()),
     skipPerTurnInjections: volatileField(z.boolean()),
     skipInjectTypes: z.array(z.string()),
+    trackCommands: z.array(z.string()),
     rankElision: volatileField(z.boolean()),
     debug: z.boolean(),
     debugLogPath: z.string()

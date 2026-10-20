@@ -448,8 +448,21 @@ function searchableText(event, message) {
 
 // ── result rendering ───────────────────────────────────────────────────────
 
+/**
+ * The ready-made next call after a search with hits: a window around `seq`,
+ * plus the single-entry form. Without it the reader has a pointer and has to
+ * reconstruct the argument shape from the tool description (pi-vcc's
+ * "next-step lines" serve the same purpose with its own argument names).
+ * @param {number} seq - seq of the first hit.
+ * @returns {string} the hint line.
+ */
+export function aroundFirstHitHint(seq) {
+  return `--- Around the first hit: recall with type:"seq", id:"${Math.max(0, seq - 3)}-${seq + 3}" (or id:"${seq}" for that entry alone) ---`;
+}
+
 /** Join the rendered header, hits and footers into the model-facing text. */
 function renderResult(result) {
+  const offSurface = new Set(result.offSurface ?? []);
   const lines = [
     formatSearchHeader({
       source: result.pattern,
@@ -460,7 +473,8 @@ function renderResult(result) {
       floorDropped: result.floorDropped,
       truncated: result.truncated,
       skippedTurnEvents: result.skippedTurnEvents,
-      openTurn: result.openTurn
+      openTurn: result.openTurn,
+      offSurface: offSurface.size
     }),
     ...result.hits.map((hit) => hit.text),
     ...(result.omitted > 0
@@ -468,7 +482,10 @@ function renderResult(result) {
       : []),
     ...(result.truncated ? ["[search budget exhausted; some hits were cut]"] : [])
   ];
-  if (result.hits.length > 0) lines.push("[use recall with a (seq N) pointer to restore any hit's full original content]");
+  if (result.hits.length > 0) {
+    lines.push("[use recall with a (seq N) pointer to restore any hit's full original content]");
+    lines.push(aroundFirstHitHint(result.hits[0].seq));
+  }
   return lines.join("\n\n");
 }
 
@@ -723,6 +740,19 @@ export function searchSession(session, patternSource, config) {
     scan = scanTerms(context, source, config);
   }
 
+  // Mark hits that are no longer on the model-visible surface. This engine
+  // searches the whole append-only log on purpose (that is the recall
+  // guarantee), so a hit can come from a span a rewind / message edit has since
+  // replaced. pi-vcc's equivalent is the opposite default — it reads the active
+  // lineage and announces the fallback; here the search is already "all", so
+  // what the reader needs is the label, not a retry hint.
+  const offSurface = new Set();
+  const surfaceNodes = session?.surface?.nodes;
+  if (Array.isArray(surfaceNodes)) {
+    const live = new Set(surfaceNodes);
+    for (const hit of scan.hits) if (!live.has(hit.seq)) offSurface.add(hit.seq);
+  }
+
   const result = {
     pattern: source,
     literal,
@@ -735,6 +765,7 @@ export function searchSession(session, patternSource, config) {
     terms: scan.terms,
     skippedTurnEvents: scoped.skippedEvents,
     openTurn: scoped.openTurn,
+    offSurface: [...offSurface],
     tokens: 0,
     text: ""
   };

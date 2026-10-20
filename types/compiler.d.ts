@@ -90,6 +90,8 @@ export interface CompileStats {
     injectedSkippedTokens: number;
     /** How many nodes were dropped per canonical injection key. */
     injectedByKey: Record<string, number>;
+    /** `[tracked commands]` ledger lines, `name=count` per configured command that matched. */
+    trackedCommandLines: string[];
 }
 
 /** The VCC brief-mode noise XML patterns, as regex sources. */

@@ -26,6 +26,7 @@
  */
 import { isCheckpointSource } from "./indices.js";
 import { collapseRepeatedRows, DEFAULT_RANK_WEIGHTS, lowestValueIndex, rankKeyOf, rankScore } from "./rank.js";
+import { extractTrackedCommands, formatTrackedCommands } from "./tracked.js";
 
 // The checkpoint-source rule is shared with recall (one definition, so the
 // side that PRINTS a `[checkpoint N]` marker and the side that RESOLVES it can
@@ -693,6 +694,38 @@ function nodeRef(node) {
 const RECALL_GUIDE_SENTINEL = "RECALL: append-only log";
 
 /**
+ * Lines `region.js` regenerates on EVERY checkpoint: the compaction intro, the
+ * span header, and the verbatim-retention footer.
+ *
+ * Each is built from that compaction's own span (node count, seq range, token
+ * counts), so a copy carried forward by a later checkpoint describes a
+ * generation that no longer exists — and it is charged to the new budget. They
+ * are therefore stripped on absorb exactly like the preamble, or they nest one
+ * more copy per generation: measured with this engine's own
+ * `frameCheckpoint`/`unframeCheckpointText`, three generations left the intro,
+ * header and footer three times each.
+ *
+ * Matched by the full generated shape, not by a bare prefix: a conversation
+ * line that happens to begin with `自动压缩: ` is content, and dropping it
+ * would lose text the model never re-derives. Anchors are the ones
+ * `region.js` prints (`verb` is `自动压缩` or `手动 /compact`).
+ */
+const REGENERATED_FRAME_PATTERNS = Object.freeze([
+  /^## Compiled checkpoint: \d+ nodes? \(seqs? \d+-\d+/u,
+  /^(?:自动压缩|手动 \/compact): (?:将 )?\d+ 个节点/u,
+  /^尾部原文保留: \d+ 节点/u
+]);
+
+/**
+ * Whether a line is one of the per-checkpoint framing lines above.
+ * @param {string} line - one line of an absorbed checkpoint.
+ * @returns {boolean} true when the line is regenerated framing, not content.
+ */
+function isRegeneratedFrameLine(line) {
+  return REGENERATED_FRAME_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+/**
  * Strip this engine's own checkpoint envelope from an absorbed checkpoint,
  * returning its inner body.
  *
@@ -704,11 +737,13 @@ const RECALL_GUIDE_SENTINEL = "RECALL: append-only log";
  * with three landed checkpoints carried the guide three times and the
  * preamble four times.
  *
- * The body (intro line, header line, compiled entries, retention footer) is
- * kept byte-exact: only the framing that is regenerated on every checkpoint
- * is removed. Framing that is not ours (another backend's tags, or plain text)
- * is returned as the plain projection — foreign content is never rewritten,
- * only passed through with {@link sanitize}.
+ * The body (compiled entries and any foreign text between them) is kept
+ * byte-exact: only the framing that is regenerated on every checkpoint is
+ * removed — the preamble, both tags, the recall guide, and the three
+ * per-generation lines {@link REGENERATED_FRAME_PATTERNS} names. Framing that
+ * is not ours (another backend's tags, or plain text) is returned as the plain
+ * projection — foreign content is never rewritten, only passed through with
+ * {@link sanitize}.
  * @param text - raw checkpoint text as projected from the durable message.
  * @returns the inner body, or the sanitized original when the frame is foreign.
  */
@@ -722,6 +757,7 @@ export function unframeCheckpointText(text) {
   out = out
     .split("\n")
     .filter((line) => !line.startsWith(RECALL_GUIDE_SENTINEL))
+    .filter((line) => !isRegeneratedFrameLine(line))
     .join("\n");
   return out.trim();
 }
@@ -854,7 +890,9 @@ export function compileNodes(nodes, config, budgets) {
     toolResultTokens: 0,
     /** Other-agent reports attributed with a `[subagent]` header instead of user text. */
     subagentReports: 0,
-    collapsedRows: 0
+    collapsedRows: 0,
+    /** `[tracked commands]` ledger lines, `name=count` per matching command. */
+    trackedCommandLines: []
   };
   // Pre-pass over the ordered nodes: map each tool-call id to its result node,
   // so every call one-liner can carry a VCC-style result pointer (`(seq N ->
@@ -1138,6 +1176,37 @@ export function compileNodes(nodes, config, budgets) {
     output.unshift({ seq: firstInjectedSeq, text: marker, kind: "note", score: weights.noteRow, reasons: ["injected-skipped"] });
     stats.entries += 1;
     stats.tokens += estimateEntryTokens(marker);
+  }
+  // Tracked commands (`trackCommands`): a recency ledger of the CLI invocations
+  // the session actually ran, so an ops session — one that never edits a file and
+  // never commits, and whose tool one-liners are the only trace — keeps its
+  // record across compactions. Off by default; a `note` row, so the first
+  // elision pass may drop it under cap pressure (every call stays one recall
+  // away). Ported from pi-vcc v0.10.2 `extract/tracked-commands.ts`.
+  const trackCommands = config.trackCommands ?? [];
+  if (trackCommands.length > 0) {
+    const calls = [];
+    for (const node of nodes) {
+      for (const block of node.message?.content ?? []) {
+        if (block.type !== "tool-call") continue;
+        const parsed = parseToolArguments(block.arguments);
+        if (typeof parsed?.command === "string") calls.push({ name: block.name, command: parsed.command });
+      }
+    }
+    const activity = extractTrackedCommands(calls, trackCommands);
+    const tracked = formatTrackedCommands(activity);
+    if (tracked.length > 0) {
+      const marker = { seq: nodes[0]?.seq, text: tracked, kind: "note", score: weights.noteRow, reasons: ["tracked-commands"] };
+      // Behind the injection-omission marker: that one is a statement about the
+      // whole span, this one is content the model should read next to the rows.
+      const at = output.length > 0 && output[0].reasons?.includes("injected-skipped") ? 1 : 0;
+      output.splice(at, 0, marker);
+      stats.entries += 1;
+      stats.tokens += estimateEntryTokens(tracked);
+      stats.trackedCommandLines = [...activity]
+        .filter(([, entries]) => entries.size > 0)
+        .map(([name, entries]) => `${name}=${entries.size}`);
+    }
   }
   return { entries: output, stats };
 }

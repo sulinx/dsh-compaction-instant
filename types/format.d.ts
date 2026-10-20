@@ -46,6 +46,8 @@ export interface SearchHeaderSummary {
     skippedTurnEvents?: number;
     /** The turn number that is still open, when one is. */
     openTurn?: number;
+    /** Shown hits no longer on the model-visible surface (rewound or edited). */
+    offSurface?: number;
 }
 
 /** One file touched in the session, with the seqs of every operation on it. */

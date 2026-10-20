@@ -9,6 +9,7 @@ import {
   DEFAULT_ARG_TOOLS,
   DEFAULT_NOISE_PATTERNS,
   DEFAULT_TOOL_KEY_FIELDS,
+  RECALL_GUIDE,
   compileNoisePatterns,
   compileNodes,
   compileRegion,
@@ -262,16 +263,53 @@ test("every default tool key field is whitelisted to render", () => {
 });
 
 test("unframeCheckpointText strips this engine's framing and keeps the body", () => {
-  const body = joinCompiledEntries(["## Compiled checkpoint: 3 nodes (seqs 1-3) — 2 entries", "[user] (seq 1)\nhello", "[assistant] (seq 2)\ndone"]);
-  const framed = frameCheckpoint(["[user] (seq 1)\nhello"], "## Compiled checkpoint: 3 nodes (seqs 1-3)", "自动压缩: 3 个节点").map((block) => block.text).join("\n\n");
+  const body = joinCompiledEntries(["[user] (seq 1)\nhello", "[assistant] (seq 2)\ndone"]);
+  const framed = frameCheckpoint(["[user] (seq 1)\nhello"], "## Compiled checkpoint: 3 nodes (seqs 1-3)", "自动压缩: 3 个节点 / ~900 tokens", "尾部原文保留: 2 节点 / ~80 tokens").map((block) => block.text).join("\n\n");
   assert.ok(framed.includes("<compacted-checkpoint>"), "fixture must be framed");
   const unframed = unframeCheckpointText(framed);
   assert.ok(!unframed.includes("<compacted-checkpoint>"), "tags are stripped");
   assert.ok(!unframed.includes("</compacted-checkpoint>"), "closing tag is stripped");
   assert.ok(!unframed.includes("RECALL: append-only log"), "the recall guide is stripped");
   assert.ok(!unframed.includes("automatically generated checkpoint"), "the preamble is stripped");
-  assert.match(unframed, /## Compiled checkpoint: 3 nodes/, "the body survives");
+  // The three per-generation lines describe THIS span, not the one the body
+  // came from, so carrying them forward would state a stale node/seq/token
+  // count as fact. They are framing, not provenance.
+  assert.ok(!unframed.includes("## Compiled checkpoint:"), "the span header is stripped");
+  assert.ok(!unframed.includes("自动压缩:"), "the compaction intro is stripped");
+  assert.ok(!unframed.includes("尾部原文保留:"), "the retention footer is stripped");
+  assert.equal(unframed, "[user] (seq 1)\nhello", "only the compiled body survives");
   assert.equal(unframeCheckpointText(body), body, "unframed text is already a body");
+});
+
+test("unframeCheckpointText keeps a conversation line that merely looks like framing", () => {
+  // The patterns are anchored on the generated shape (`: <digits> nodes`), so
+  // prose a user or assistant wrote is never mistaken for a frame line.
+  const framed = frameCheckpoint([
+    "[user] (seq 1)\n自动压缩: 我上次试过这个功能，没什么用"
+  ], "## Compiled checkpoint: 2 nodes (seqs 1-2)").map((block) => block.text).join("\n\n");
+  const unframed = unframeCheckpointText(framed);
+  assert.match(unframed, /自动压缩: 我上次试过这个功能/, "user prose survives");
+  assert.ok(!unframed.includes("## Compiled checkpoint:"), "the real header is still stripped");
+});
+
+test("absorbing a checkpoint three times does not stack its framing", () => {
+  const entries = [{ seq: 3, text: "[user]\nreal ask (seq 3)" }];
+  const intro = "自动压缩: 将 42 个节点 / ~9000 tokens 编译为 7 条目 / ~1200 tokens";
+  const header = "## Compiled checkpoint: 42 nodes (seqs 1-42, ~9000 tokens) — 7 entries, ~1200 tokens compiled";
+  const footer = "尾部原文保留: 5 节点 / ~800 tokens（whole-turns）";
+  const count = (hay, needle) => hay.split(needle).length - 1;
+
+  const gen1 = frameCheckpoint(entries, header, intro, footer).map((block) => block.text).join("\n\n");
+  const body1 = unframeCheckpointText(gen1);
+  const gen2 = frameCheckpoint([{ seq: 9, text: body1 }], header, intro, footer).map((block) => block.text).join("\n\n");
+  const body2 = unframeCheckpointText(gen2);
+  const gen3 = frameCheckpoint([{ seq: 20, text: body2 }], header, intro, footer).map((block) => block.text).join("\n\n");
+
+  assert.equal(count(gen3, intro), 1, "one intro, not one per generation");
+  assert.equal(count(gen3, header), 1, "one header, not one per generation");
+  assert.equal(count(gen3, footer), 1, "one footer, not one per generation");
+  assert.equal(count(gen3, RECALL_GUIDE), 1, "one recall guide");
+  assert.match(body2, /real ask \(seq 3\)/, "the compiled body still carries forward");
 });
 
 test("unframeCheckpointText passes foreign framing through", () => {
@@ -293,7 +331,8 @@ test("compileNodes absorbs a framed checkpoint without nesting its framing", () 
   const absorbed = entries[0].text;
   assert.ok(!absorbed.includes("<compacted-checkpoint>"), "no nested envelope");
   assert.ok(!absorbed.includes("RECALL: append-only log"), "no nested recall guide");
-  assert.match(absorbed, /## Compiled checkpoint: 2 nodes/, "the prior header survives as provenance");
+  assert.ok(!absorbed.includes("## Compiled checkpoint:"), "the stale span header is dropped, not copied forward");
+  assert.match(absorbed, /hello/, "the previously compiled content still carries forward");
   // Re-compiling the result must not add framing either: the body stays stable.
   const again = compileNodes([{ seq: 3, message: { role: "user", content: [{ type: "text", text: absorbed.replace(/^\[system\]\n/, "") }], source: { kind: "plugin", plugin: "compact" } } }], CONFIG);
   assert.ok(!again.entries[0].text.includes("RECALL: append-only log"));

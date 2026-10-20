@@ -68,8 +68,9 @@ export function formatHitBlock(hit) {
 /**
  * Render one search/recall result header, stating honestly what was withheld:
  * the shown count against the genuine match count, the relative-floor drop,
- * and the literal-match downgrade.
- * @param summary - `{ source, literal?, mode?, totalMatches, shown, floorDropped?, truncated? }`.
+ * the literal-match downgrade, and how many hits are no longer on the
+ * model-visible surface.
+ * @param summary - `{ source, literal?, mode?, totalMatches, shown, floorDropped?, truncated?, offSurface? }`.
  * @returns the header line.
  */
 export function formatSearchHeader(summary) {
@@ -87,6 +88,13 @@ export function formatSearchHeader(summary) {
   if (summary.skippedTurnEvents !== undefined && summary.skippedTurnEvents > 0) {
     const turn = summary.openTurn === undefined ? "" : ` (turn ${summary.openTurn})`;
     parts.push(`; the turn in progress${turn} is not searched (${summary.skippedTurnEvents} event(s) so far)`);
+  }
+  // This engine searches the whole append-only log, so a hit may have been
+  // replaced (rewind / message edit) since it was written. Saying so matters:
+  // the text is still the truth of what happened, but it is no longer what the
+  // model was told.
+  if (summary.offSurface !== undefined && summary.offSurface > 0) {
+    parts.push(`; ${summary.offSurface} hit(s) not in the current context (edited or rewound), still recallable`);
   }
   parts.push("]");
   return parts.join("");

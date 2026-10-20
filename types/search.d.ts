@@ -73,6 +73,12 @@ export interface SearchResult {
     truncated: boolean;
     /** Effective query terms (ranked path only). */
     terms?: readonly string[];
+    /**
+     * Seqs of shown hits that are no longer on the model-visible surface (a
+     * rewind or message edit replaced them). The text is still recallable — it
+     * is simply no longer what the model was told.
+     */
+    offSurface: number[];
     /** Density-aware token total of the rendered hits. */
     tokens: number;
     /** The joined model-facing text. */
@@ -151,5 +157,7 @@ export declare function resolveSearchPattern(source: unknown): ResolvedSearchPat
 export declare function compileSearchPattern(source: unknown): RegExp;
 /** Search the durable log; returns matching events with their seq pointers. */
 export declare function searchSession(session: SearchableSession, patternSource: string, config: SearchConfig): SearchResult;
+/** The ready-made recall call printed after a search that found something. */
+export declare function aroundFirstHitHint(seq: number): string;
 /** Aggregate every file operation in the session by path, in first-touch order. */
 export declare function collectTouchedFiles(session: SearchableSession, config?: TouchedConfig): TouchedResult;

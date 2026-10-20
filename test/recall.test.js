@@ -71,11 +71,21 @@ test("parseSeqSpec accepts numbers, ranges, and checkpoint marker forms", () => 
   assert.deepEqual(parseSeqSpec("#3-7").selections, [{ start: 3, end: 7 }]);
 });
 
-test("parseSeqSpec rejects malformed and reversed selections but accepts wide ranges", () => {
+test("parseSeqSpec rejects malformed selections, repairs certain mistakes, and accepts wide ranges", () => {
   assert.ok(parseSeqSpec("").errors.length > 0);
   assert.ok(parseSeqSpec("abc").errors.length > 0);
-  assert.ok(parseSeqSpec("7-3").errors.length > 0);
   assert.ok(parseSeqSpec("1,xyz,2").errors.length === 1);
+  // A reversed range is repaired, not rejected: a selection is a set, so the
+  // order of its endpoints carries no meaning (pi-vcc v0.10.2 repairs the same
+  // forms before its own validator runs).
+  assert.equal(parseSeqSpec("7-3").errors.length, 0);
+  assert.deepEqual(parseSeqSpec("7-3").selections, [{ start: 3, end: 7 }]);
+  // `..`, `to` and a bracketed pair are the same range written differently.
+  assert.deepEqual(parseSeqSpec("3..7").selections, [{ start: 3, end: 7 }]);
+  assert.deepEqual(parseSeqSpec("3 to 7").selections, [{ start: 3, end: 7 }]);
+  // A bare word with no numeric reading stays an error: this engine has no
+  // scope concept, so "ALL" has nowhere to be redirected.
+  assert.ok(parseSeqSpec("ALL").errors.length > 0);
   // A range wider than the expansion chunk is NOT an error any more: the
   // engine prints `[N entries elided: seqs A-B]` markers, and a marker the
   // agent cannot paste back is a pointer that does not work. Expansion is

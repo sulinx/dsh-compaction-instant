@@ -18,19 +18,25 @@ Upstream was archived on 2026-09-02, so these fixes are maintained here.
 | file | sha16 (with patches applied) |
 |---|---|
 | `src/region.js` | `0F5543FB26433AEE` (was `4D9318B2DB6AB0E5` before P4c, `BBD0EEE8E8CD4988` before P4b, `6F843C543DA9166A` before P2b) |
-| `src/index.js` | `1B443A2976D7A83B` (was `4BDC82DDB6EC5D6C` before P4c, `8370859F661310C3` before P4b, `0C4B7B964A40A690` before P4a) |
-| `src/recall.js` | `5AB801947A2D52D5` (was `ABE901B9914A8A3C` before P5c, `41696141C6052B9E` before the P2b reference space, `149567516934D9F4` before the P1 port) |
-| `src/search.js` | `53A6DDA5AFDD4B62` (was `4174CA63AB2B047F` before P5b, `6663A321F8101DD4` before P5a, `83CAC25D83CA7A34` before P3) |
-| `src/format.js` | `4B7B2CC78BF8F277` (was `8F3B416165CC24EE` before P5b, new in P1) |
-| `src/compiler.js` | `ECA9B986D502992A` (was `C86BB3361FA261B7` before P4c, `1761DA2A2BA36C9F` before P4b, `C5E9669636AEB400` before P2b/P3) |
+| `src/index.js` | `EC7F232AD0A85A3A` (was `1B443A2976D7A83B` before P8, `4BDC82DDB6EC5D6C` before P4c, `8370859F661310C3` before P4b, `0C4B7B964A40A690` before P4a) |
+| `src/recall.js` | `376817D429B1A9A5` (was `5AB801947A2D52D5` before P8, `ABE901B9914A8A3C` before P5c, `41696141C6052B9E` before the P2b reference space, `149567516934D9F4` before the P1 port) |
+| `src/search.js` | `B851F39D9CC15011` (was `53A6DDA5AFDD4B62` before P8, `4174CA63AB2B047F` before P5b, `6663A321F8101DD4` before P5a, `83CAC25D83CA7A34` before P3) |
+| `src/format.js` | `7E7B6A54A70579BF` (was `4B7B2CC78BF8F277` before P8, `8F3B416165CC24EE` before P5b, new in P1) |
+| `src/compiler.js` | `6845679530BAA88F` (was `ECA9B986D502992A` before P8, `C86BB3361FA261B7` before P4c, `1761DA2A2BA36C9F` before P4b, `C5E9669636AEB400` before P2b/P3) |
+| `src/tracked.js` | `8CA655174E124083` (new in P8) |
 | `src/rank.js` | `46A83369C05B2342` (new in P3) |
 | `src/indices.js` | `3E424B8996EC658F` (new in P2b) |
 | `src/tool.js` | `8F834C367C47D4B9` (was `D660C4338F1A9C9C` before P5c, `172F89B496041B4C` after P0) |
 | `src/command.js` | `EBB2945092E7421D` (was `7177D4ABE27DF971` after P2b, `F07169D9940A776B` after P0) |
 | `src/client.js` | `B381A4E221DEE2F5` (was `8E6D703258F13017` before P4a, `4AD3ACBAA3202950` before the P2b/P3 card fields) |
+| `package.json` | `79DF277B5E21D170` (was `49C7FA535DC7…` before P8 — the `./tracked` export) |
 
-Refreshed at P4a/P4b/P4c/P5a/P5b/P5c: the previous revision of this table still carried pre-P2b/P3 values for
-`region.js`, `index.js`, `recall.js`, `search.js`, `compiler.js`, `command.js` and `client.js`.
+Refreshed at P8 (pi-vcc v0.10.2 port): `compiler.js`, `index.js`, `recall.js`, `search.js`, `format.js`,
+`package.json` and the new `tracked.js` changed; `region.js`, `rank.js`, `indices.js`, `tool.js`,
+`command.js`, `client.js` are untouched and keep their previous fingerprints.
+
+Previous refresh was at P4a/P4b/P4c/P5a/P5b/P5c: the revision of this table before that still carried
+pre-P2b/P3 values for `region.js`, `index.js`, `recall.js`, `search.js`, `compiler.js`, `command.js` and `client.js`.
 
 These fingerprints are the reference for any deployment that tracks this fork: a deployed copy must match them,
 and any intentional change here must update the tracking manifest in the same commit.
@@ -162,6 +168,33 @@ Verified against a real 0.1.7-alpha.1 harness (`iso017` profile, isolated `DSH_H
 No other imported host API changed (see `_updates/20260922-p0-search-redos/api-diff-016-vs-017.mjs`).
 
 
+
+## P8 · port of pi-vcc v0.10.2 (2026-10-20)
+
+`sting8k/pi-vcc` reached **v0.10.2** (`733e872`, 2026-10-15; no commits since, `[Unreleased]` empty).
+Our vendored baseline is v0.8.0, so all 24 entries between them were triaged — see
+`K:\dshwork\_dsh_patches\compaction-instant-pi-vcc-0.10.2-port\REPORT.md` for the full table.
+Only four things were worth doing; the rest were either already implemented here by P5a/P5b/P5c
+(range/paging, `expand` with results, turn skipping, one RegExp compile per term, `Ignored:`) or are
+Pi-host-specific (0.8.1 `system` entries, 0.8.2 heredoc commit subjects / npm `files`, 0.10.1
+`context_edit`, 0.10.2 config path + prompt snippet).
+
+| # | file | upstream source | change |
+|---|---|---|---|
+| P8 | `src/compiler.js` | **not upstream** — a same-family defect found while triaging 0.8.3 | `unframeCheckpointText` also drops the three lines `region.js` regenerates on **every** checkpoint (`## Compiled checkpoint: …`, `自动压缩: …` / `手动 /compact: …`, `尾部原文保留: …`). Absorbing a checkpoint used to carry those forward verbatim, so each generation added one more copy **describing a span that no longer exists** — measured three generations = three intros, three headers, three footers. Patterns are anchored on the generated shape (`: <digits> nodes`), so conversation prose that merely starts with `自动压缩: ` survives. Tests: `test/compiler.test.js` (multi-generation, look-alike prose). |
+| P8 | `src/tracked.js` (new), `src/compiler.js`, `src/index.js`, `types/*` | `src/extract/tracked-commands.ts` + `core/settings.ts` (`trackCommands`, 0.9.0) | `trackCommands`: a `[tracked commands]` **note row** listing the invocations the user asked to remember (10 most recent per name, `(+N earlier)` for the rest). Entries are the command as written up to the next **unquoted** separator; `sudo`/`env`/`VAR=` prefixes are seen through but kept; an `ssh host '<cmd>'` remote command is scanned too. Scanned tools are `pwsh`/`bash`/`shell`/`ssh_exec`/`ssh_batch`. **Default `[]` = off**, so existing profiles compile byte-identically. |
+| P8 | `src/search.js`, `src/format.js` | `core/recall-run.ts` "next-step lines" (0.10.0) | After a search with hits, print a ready-made call: `recall type:"seq" id:"<n-3>-<n+3>"` around the first hit (this engine's typed arguments, not upstream's `range:[…]`). |
+| P8 | `src/recall.js`, `src/search.js`, `src/format.js` | `core/recall-request.ts` forgiving arguments (0.10.0) + off-path fallback | ① `parseSeqSpec` repairs `3..7` / `3 to 7` / `[7, 3]` / reversed `7-3` (a selection is a set); `ALL` stays an error because this engine has no scope concept. ② The **inverse** of upstream's default: this engine searches the whole append-only log on purpose, so a hit that a rewind/message edit has removed from the surface is **labelled** in the header (`N hit(s) not in the current context … still recallable`) rather than hidden behind a lineage default. |
+
+**Verification**: `node --test` = **251 tests / 220 pass / 31 fail**, and the 31 failures are the same
+names as before P8 (old fixtures rejected by the host's settlement-field validation) — diffed by test
+name, zero new failures. `npm run check` (11 × `node --check`) clean. Loading probe: the whole package
+copied into `<tree>\node_modules\_probe_compaction_instant` resolved and imported, `Config` exported, a
+`trackCommands: ["docker"]` compile emitted the ledger row; probe dir removed. Four copies
+(repo / this staging dir / `profiles\web` / `profiles\instanttest`) hash-identical.
+
+**Deployment note**: this is a `file:` dependency, loaded at harness start — the user must restart the
+shell from the tray for P8 to take effect (not a profile hot-recompose).
 
 ## Rules when porting upstream changes
 
