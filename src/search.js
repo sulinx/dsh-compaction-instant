@@ -72,7 +72,7 @@
 import { estimateEntryTokens, parseToolArguments, sanitize, truncateTokens } from "./compiler.js";
 import { projectMessageText } from "./recall.js";
 import { formatHitBlock, formatSearchHeader, formatTouchedOutput, TOUCHED_PAGE_SIZE } from "./format.js";
-import { createEventIndex, sessionEvents } from "./indices.js";
+import { createEventIndex, sessionEvents, SURFACE_EVENT_TYPES } from "./indices.js";
 
 /** Default cap on the number of matching events shown in one result. */
 export const DEFAULT_MAX_SEARCH_HITS = 50;
@@ -746,11 +746,23 @@ export function searchSession(session, patternSource, config) {
   // replaced. pi-vcc's equivalent is the opposite default — it reads the active
   // lineage and announces the fallback; here the search is already "all", so
   // what the reader needs is the label, not a retry hint.
+  //
+  // Only a message event can have BEEN on the surface and lost it. Log-only
+  // events (tool/call, session/title, agent/inbox/spliced, request/header, …)
+  // never occupy a surface node by construction, so counting them would report
+  // a replacement that never happened — measured on a real session: a 10-hit
+  // search labelled 6 of them "not in the current context" while every one was
+  // simply an event type the surface never carries.
   const offSurface = new Set();
   const surfaceNodes = session?.surface?.nodes;
   if (Array.isArray(surfaceNodes)) {
     const live = new Set(surfaceNodes);
-    for (const hit of scan.hits) if (!live.has(hit.seq)) offSurface.add(hit.seq);
+    for (const hit of scan.hits) {
+      if (live.has(hit.seq)) continue;
+      const type = index.at(hit.seq)?.type;
+      if (!SURFACE_EVENT_TYPES.has(type)) continue;
+      offSurface.add(hit.seq);
+    }
   }
 
   const result = {

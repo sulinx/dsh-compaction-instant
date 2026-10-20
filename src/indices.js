@@ -139,6 +139,24 @@ export function isCountedMessageEntry(event) {
 }
 
 /**
+ * Event types that can occupy a model-visible surface node.
+ *
+ * Mirrors the host's `SURFACE_EVENT_TYPES` (`@deepseek-ai/dsh-session`): only a
+ * message-producing type takes part in the surface, so every other log type —
+ * `tool/call`, `session/title`, `agent/inbox/spliced`, `request/header`,
+ * `step/start`, … — has no surface node by construction. Read-back code that
+ * asks "was this event on the surface?" must ask this first, or it reports a
+ * replacement that never happened.
+ */
+export const SURFACE_EVENT_TYPES = Object.freeze(new Set([
+  "system/message",
+  "developer/message",
+  "user/message",
+  "assistant/message",
+  "tool/result"
+]));
+
+/**
  * Count this session's landed checkpoints in one pass.
  *
  * Each compaction replaces its span with exactly one checkpoint node, so the
